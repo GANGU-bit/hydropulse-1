@@ -10,6 +10,7 @@ import IncidentPanel from './components/IncidentPanel.jsx';
 import PressureCharts from './components/PressureCharts.jsx';
 import RoiPanel from './components/RoiPanel.jsx';
 import StatusBanner from './components/StatusBanner.jsx';
+import NetworkStudio from './pages/NetworkStudio.jsx';
 import { useHydroPulse } from './hooks/useHydroPulse.js';
 
 export default function App() {
@@ -38,6 +39,7 @@ export default function App() {
     [roi, setRoi] = useState(false),
     [focusNode, setFocusNode] = useState(null),
     [toast, setToast] = useState('');
+  const [studioOpen, setStudioOpen] = useState(false);
   const run = useCallback(
     async (body, preset) => {
       const r = await simulate(body, preset);
@@ -64,6 +66,7 @@ export default function App() {
     }
   }, [error]);
   useEffect(() => {
+    if (studioOpen) return undefined;
     // Ignore global shortcuts while the operator is typing or editing a control.
     const fn = (e) => {
       const target = e.target;
@@ -112,7 +115,7 @@ export default function App() {
     };
     window.addEventListener('keydown', fn);
     return () => window.removeEventListener('keydown', fn);
-  }, [presets, run, selected, area, noise, lastResult, isolate, reset, judge]);
+  }, [presets, run, selected, area, noise, lastResult, isolate, reset, judge, studioOpen]);
   const truth = lastResult?.injected_node_id;
   const candidate = lastResult?.predicted_top_candidates?.[0]?.node_id;
   // Older backend responses may omit localization_error_m, so derive distance from node coordinates.
@@ -129,12 +132,20 @@ export default function App() {
   const showTruth = !judge || revealed;
   const errorMeters = lastResult?.localization_error_m ?? distance;
   return (
+    studioOpen ? (
+      <NetworkStudio
+        initialNetwork={network}
+        networkSource={networkSource}
+        onExit={() => setStudioOpen(false)}
+      />
+    ) : (
     <main className='app-shell'>
       <Header
         mode={mode}
         health={health}
         onHelp={() => setHelp(true)}
         onRoi={() => setRoi(true)}
+        onStudio={() => setStudioOpen(true)}
       />
       <StatusBanner mode={mode} networkSource={networkSource} onRetry={load} />
       <div className='workspace'>
@@ -260,5 +271,6 @@ export default function App() {
         </div>
       )}
     </main>
+    )
   );
 }
