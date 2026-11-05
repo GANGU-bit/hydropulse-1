@@ -29,7 +29,6 @@ on:
   # attacker-controlled diffs to the model. The action itself also hard-refuses it.
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
 
 # Least privilege. No contents:write, no actions:write, no administration:write.
 # Jules can read the repo and write review artefacts. It cannot push or merge.

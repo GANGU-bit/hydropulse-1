@@ -61,7 +61,7 @@ Nothing else in CI/CD or the codebase depends on Jules.
 
 ```mermaid
 flowchart LR
-    A[PR event<br>opened / synchronize / reopened / ready_for_review<br>towards main] --> B{Job guard<br>JULES_REVIEW_ENABLED != 'false'<br>head repo == base repo<br>not a draft}
+    A[PR event<br>opened / synchronize / reopened / ready_for_review<br>towards any target branch] --> B{Job guard<br>JULES_REVIEW_ENABLED != 'false'<br>head repo == base repo<br>not a draft}
     B -- skip --> X[No run, no API call,<br>no check run, no session]
     B -- pass --> C[Preflight:<br>JULES_API_KEY present?]
     C -- missing --> X
@@ -180,7 +180,7 @@ that PR only. Use it for trivial PRs (typos, doc-only changes) to save quota.
 
 ## 5. Trigger events
 
-The workflow triggers on `pull_request` with exactly four types, filtered to `main`:
+The workflow triggers on `pull_request` with exactly four types, regardless of the target/base branch:
 
 | Event type | Meaning |
 | --- | --- |
