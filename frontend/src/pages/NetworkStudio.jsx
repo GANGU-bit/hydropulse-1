@@ -32,6 +32,12 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  Database,
+  Globe,
+  Map,
+  Compass,
+  FileUp,
+  Layers,
 } from 'lucide-react';
 import {
   createDemoDraft,
@@ -41,6 +47,12 @@ import {
   STUDIO_DRAFT_KEY,
   validateDraft,
 } from '../lib/networkStudio.js';
+import DataCatalogModal from '../components/DataCatalogModal.jsx';
+import ImportWizardModal from '../components/ImportWizardModal.jsx';
+import FeatureInspectorPanel from '../components/FeatureInspectorPanel.jsx';
+import Terrain3DViewer from '../components/Terrain3DViewer.jsx';
+import GeographicMapCanvas from '../components/GeographicMapCanvas.jsx';
+import { DATA_CATALOG, REAL_WORLD_FEATURES } from '../lib/realWorldData.js';
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const NODE_TYPES = ['junction', 'reservoir', 'tank'];
@@ -336,6 +348,52 @@ function StudioWorkspace({ initialNetwork, networkSource, onExit }) {
   const flow = useReactFlow();
   const validation = useMemo(() => validateDraft(draft), [draft]);
   const allIssues = [...validation.errors, ...validation.warnings];
+
+  // Real-World Data Layer States
+  const [viewMode, setViewMode] = useState('schematic'); // 'schematic' | 'geographic' | 'terrain3d'
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [inspectedFeature, setInspectedFeature] = useState(null);
+  const [activeLayerIds, setActiveLayerIds] = useState([
+    'bwssb_water_lines_detailed_part_1',
+    'bwssb_water_lines_gt_300mm',
+    'bwssb_valves_kengeri',
+    'bwssb_pumping_stations',
+    'bwssb_borewells',
+    'bwssb_sewerage_network',
+    'nwdp_groundwater_telemetry',
+  ]);
+  const [visibleLayers, setVisibleLayers] = useState({
+    potable_water: true,
+    valves: true,
+    infrastructure: true,
+    groundwater: true,
+    sewerage: true,
+    surface_water: true,
+    monitors: true,
+    admin_boundary: true,
+    terrain: true,
+  });
+  const [showIllustrativeDepth, setShowIllustrativeDepth] = useState(true);
+  const [stagedLayers, setStagedLayers] = useState([]);
+
+  const toggleLayer = useCallback((layerKey) => {
+    setVisibleLayers((prev) => ({
+      ...prev,
+      [layerKey]: !prev[layerKey],
+    }));
+  }, []);
+
+  const toggleCatalogLayer = useCallback((layerId) => {
+    setActiveLayerIds((prev) =>
+      prev.includes(layerId) ? prev.filter((id) => id !== layerId) : [...prev, layerId],
+    );
+  }, []);
+
+  const handleImportStaged = useCallback((staged) => {
+    setStagedLayers((prev) => [...prev, staged]);
+    setNotice(`Staged "${staged.displayName}" (${staged.featureCount} features). WNTR model remains frozen.`);
+  }, []);
 
   const replaceDraft = useCallback((next, markDirty = true) => {
     const normalized = normalizeDraft(next);
@@ -809,6 +867,42 @@ function StudioWorkspace({ initialNetwork, networkSource, onExit }) {
           <i />{dirty ? 'Unsaved changes' : 'Saved locally'}
         </span>
         <div className='studio-toolbar-separator' />
+        <div className='studio-mode-switcher'>
+          <button
+            className={`mode-pill ${viewMode === 'schematic' ? 'is-active' : ''}`}
+            onClick={() => setViewMode('schematic')}
+          >
+            <GitBranch size={13} /> Schematic
+          </button>
+          <button
+            className={`mode-pill ${viewMode === 'geographic' ? 'is-active' : ''}`}
+            onClick={() => setViewMode('geographic')}
+          >
+            <Map size={13} /> GIS Map
+          </button>
+          <button
+            className={`mode-pill ${viewMode === 'terrain3d' ? 'is-active' : ''}`}
+            onClick={() => setViewMode('terrain3d')}
+          >
+            <Compass size={13} /> 3D Terrain
+          </button>
+        </div>
+        <div className='studio-toolbar-separator' />
+        <button
+          className='studio-text-button secondary'
+          onClick={() => setCatalogOpen(true)}
+          title='Open Real-World Data Catalog'
+        >
+          <Database size={15} /> Data Catalog ({DATA_CATALOG.length})
+        </button>
+        <button
+          className='studio-text-button secondary'
+          onClick={() => setImportOpen(true)}
+          title='Stage Real-World GIS Layer'
+        >
+          <FileUp size={15} /> Import Layer
+        </button>
+        <div className='studio-toolbar-separator' />
         <ToolbarButton icon={Undo2} label='Undo' disabled={!past.length} onClick={undo} />
         <ToolbarButton icon={Redo2} label='Redo' disabled={!future.length} onClick={redo} />
         <div className='studio-toolbar-separator' />
@@ -858,76 +952,103 @@ function StudioWorkspace({ initialNetwork, networkSource, onExit }) {
         </aside>
 
         <section className={`studio-canvas-shell ${tool === 'pipe' ? 'tool-pipe' : ''} ${NODE_TYPES.includes(tool) ? 'tool-place' : ''}`}>
-          <div className='studio-canvas-topline'>
-            <div><span className='studio-canvas-dot' /> SCHEMATIC CANVAS <small>NOT TO SCALE</small></div>
-            <div className='studio-canvas-controls'>
-              <ToolbarButton icon={ZoomOut} label='Zoom out' onClick={() => flow.zoomOut({ duration: 160 })} />
-              <span>{Math.round((draft.editor_layout.viewport.zoom || 1) * 100)}%</span>
-              <ToolbarButton icon={ZoomIn} label='Zoom in' onClick={() => flow.zoomIn({ duration: 160 })} />
-              <button className='studio-fit-button' onClick={() => flow.fitView({ padding: 0.18, duration: 300 })}>Fit</button>
-            </div>
-          </div>
-          <div className='studio-flow-wrap'>
-            {draft.network.nodes.length === 0 && (
-              <div className='studio-welcome'>
-                <div className='studio-welcome-icon'><GitBranch size={25} /></div>
-                <span className='studio-eyebrow'>NETWORK STUDIO</span>
-                <h1>Sketch a connected water network.</h1>
-                <p>Start from a small Kengeri sample or build a blank schematic. Screen positions remain separate from geographic coordinates.</p>
-                <div className='studio-welcome-actions'>
-                  <button className='studio-text-button primary' onClick={loadDemo}><Waves size={16} /> Load Kengeri sample</button>
-                  <button className='studio-text-button secondary' onClick={() => addNode('reservoir', { x: 280, y: 250 })}><FilePlus2 size={16} /> Add first source</button>
+          {viewMode === 'schematic' ? (
+            <>
+              <div className='studio-canvas-topline'>
+                <div><span className='studio-canvas-dot' /> SCHEMATIC CANVAS <small>NOT TO SCALE</small></div>
+                <div className='studio-canvas-controls'>
+                  <ToolbarButton icon={ZoomOut} label='Zoom out' onClick={() => flow.zoomOut({ duration: 160 })} />
+                  <span>{Math.round((draft.editor_layout.viewport.zoom || 1) * 100)}%</span>
+                  <ToolbarButton icon={ZoomIn} label='Zoom in' onClick={() => flow.zoomIn({ duration: 160 })} />
+                  <button className='studio-fit-button' onClick={() => flow.fitView({ padding: 0.18, duration: 300 })}>Fit</button>
                 </div>
-                <small>Drafts save in this browser. You can also export or import JSON.</small>
               </div>
-            )}
-            <ReactFlow
-              nodes={flowNodes}
-              edges={edges}
-              nodeTypes={nodeTypes}
-              edgeTypes={edgeTypes}
-              onNodesChange={onNodesChange}
-              onEdgesChange={(changes) => {
-                changes.forEach((change) => {
-                  if (change.type === 'select') setSelection(change.selected ? { type: 'pipe', id: change.id } : null);
-                });
-              }}
-              onNodeClick={handleNodeClick}
-              onNodeDragStart={startDrag}
-              onNodeDragStop={finishDrag}
-              onEdgeClick={handleEdgeClick}
-              onPaneClick={onPaneClick}
-              onPaneMouseMove={(event) => {
-                if (pendingConnection) setCursor(flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
-              }}
-              onMoveEnd={onMoveEnd}
-              onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
-                if (selectedNodes.length) setSelection({ type: 'node', id: selectedNodes.at(-1).id });
-                else if (selectedEdges.length) setSelection({ type: 'pipe', id: selectedEdges.at(-1).id });
-                else setSelection(null);
-              }}
-              onPaneContextMenu={(event) => event.preventDefault()}
-              fitView={false}
-              defaultViewport={draft.editor_layout.viewport}
-              minZoom={0.25}
-              maxZoom={2}
-              nodesDraggable={tool === 'select'}
-              nodesConnectable={false}
-              edgesReconnectable={false}
-              elementsSelectable={tool === 'select' || tool === 'delete'}
-              panOnDrag
-              selectionOnDrag={false}
-              deleteKeyCode={null}
-              snapToGrid
-              snapGrid={[20, 20]}
-              onError={(code, message) => console.error('[RF ERROR]', code, message)}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background variant={BackgroundVariant.Dots} gap={20} size={1.15} color='#304260' />
-              <FlowViewport draft={draft} viewVersion={viewVersion} />
-            </ReactFlow>
-            <div className='studio-canvas-hint'><MousePointer2 size={13} />{placeHint}</div>
-          </div>
+              <div className='studio-flow-wrap'>
+                {draft.network.nodes.length === 0 && (
+                  <div className='studio-welcome'>
+                    <div className='studio-welcome-icon'><GitBranch size={25} /></div>
+                    <span className='studio-eyebrow'>NETWORK STUDIO</span>
+                    <h1>Sketch a connected water network.</h1>
+                    <p>Start from a small Kengeri sample or build a blank schematic. Screen positions remain separate from geographic coordinates.</p>
+                    <div className='studio-welcome-actions'>
+                      <button className='studio-text-button primary' onClick={loadDemo}><Waves size={16} /> Load Kengeri sample</button>
+                      <button className='studio-text-button secondary' onClick={() => addNode('reservoir', { x: 280, y: 250 })}><FilePlus2 size={16} /> Add first source</button>
+                    </div>
+                    <small>Drafts save in this browser. You can also export or import JSON.</small>
+                  </div>
+                )}
+                <ReactFlow
+                  nodes={flowNodes}
+                  edges={edges}
+                  nodeTypes={nodeTypes}
+                  edgeTypes={edgeTypes}
+                  onNodesChange={onNodesChange}
+                  onEdgesChange={(changes) => {
+                    changes.forEach((change) => {
+                      if (change.type === 'select') setSelection(change.selected ? { type: 'pipe', id: change.id } : null);
+                    });
+                  }}
+                  onNodeClick={handleNodeClick}
+                  onNodeDragStart={startDrag}
+                  onNodeDragStop={finishDrag}
+                  onEdgeClick={handleEdgeClick}
+                  onPaneClick={onPaneClick}
+                  onPaneMouseMove={(event) => {
+                    if (pendingConnection) setCursor(flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+                  }}
+                  onMoveEnd={onMoveEnd}
+                  onSelectionChange={({ nodes: selectedNodes, edges: selectedEdges }) => {
+                    if (selectedNodes.length) setSelection({ type: 'node', id: selectedNodes.at(-1).id });
+                    else if (selectedEdges.length) setSelection({ type: 'pipe', id: selectedEdges.at(-1).id });
+                    else setSelection(null);
+                  }}
+                  onPaneContextMenu={(event) => event.preventDefault()}
+                  fitView={false}
+                  defaultViewport={draft.editor_layout.viewport}
+                  minZoom={0.25}
+                  maxZoom={2}
+                  nodesDraggable={tool === 'select'}
+                  nodesConnectable={false}
+                  edgesReconnectable={false}
+                  elementsSelectable={tool === 'select' || tool === 'delete'}
+                  panOnDrag
+                  selectionOnDrag={false}
+                  deleteKeyCode={null}
+                  snapToGrid
+                  snapGrid={[20, 20]}
+                  onError={(code, message) => console.error('[RF ERROR]', code, message)}
+                  proOptions={{ hideAttribution: true }}
+                >
+                  <Background variant={BackgroundVariant.Dots} gap={20} size={1.15} color='#304260' />
+                  <FlowViewport draft={draft} viewVersion={viewVersion} />
+                </ReactFlow>
+                <div className='studio-canvas-hint'><MousePointer2 size={13} />{placeHint}</div>
+              </div>
+            </>
+          ) : viewMode === 'geographic' ? (
+            <GeographicMapCanvas
+              selectedFeature={inspectedFeature}
+              onSelectFeature={(feat) => setInspectedFeature(feat)}
+              visibleLayers={visibleLayers}
+              onToggleLayer={toggleLayer}
+              stagedLayers={stagedLayers}
+            />
+          ) : (
+            <Terrain3DViewer
+              selectedFeature={inspectedFeature}
+              onSelectFeature={(feat) => setInspectedFeature(feat)}
+              showIllustrativeDepth={showIllustrativeDepth}
+              onToggleDepth={() => setShowIllustrativeDepth((d) => !d)}
+              visibleLayers={visibleLayers}
+            />
+          )}
+
+          {inspectedFeature && (
+            <FeatureInspectorPanel
+              feature={inspectedFeature}
+              onClose={() => setInspectedFeature(null)}
+            />
+          )}
         </section>
 
         <PropertiesPanel draft={draft} selection={selection} onField={updateField} onRemove={requestDelete} />
@@ -980,6 +1101,22 @@ function StudioWorkspace({ initialNetwork, networkSource, onExit }) {
           </section>
         </div>
       )}
+
+      {/* Real-World Data Catalog Modal */}
+      <DataCatalogModal
+        isOpen={catalogOpen}
+        onClose={() => setCatalogOpen(false)}
+        activeLayerIds={activeLayerIds}
+        onToggleLayer={toggleCatalogLayer}
+        onSelectDataset={() => {}}
+      />
+
+      {/* Real-World Staging Import Wizard */}
+      <ImportWizardModal
+        isOpen={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImportStaged={handleImportStaged}
+      />
     </main>
   );
 }
