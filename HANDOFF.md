@@ -11,7 +11,7 @@ Append-only log for team communications across phases.
 [backend-mvp] FROM hardhik TO gangu: data_utils/presets.json does not exist yet; GET /api/presets auto-generates 3 presets on real ids (kengeri_mainline_rupture, residential_lane_seep, joint_crack_junction). ACTION: build_presets.py when ready.
 [backend-mvp] FROM hardhik TO jasmine: backend/benchmark_report.md is generated on the synthetic network â€” do NOT quote it as Kengeri results until regenerated on the OSM network. Contract example "482 LPM for 25 cmÂ²" is not physical: Torricelli gives ~3,000+ LPM at 40â€“55 m; real numbers come from the API.
 [backend-mvp] FROM hardhik TO badri: API contract v1.0 implemented unchanged (backend/main.py). Run `make backend` â†’ http://localhost:8000/docs. POST /api/isolate (stretch) is live too.
-[backend-audit] FROM hardhik TO all: from now on EVERY change goes through a small PR to main, marked Ready for review so Jules runs (SOURCE_OF_TRUTH.md Â§10, v1.0.1). No direct pushes to main.
+[backend-audit] FROM hardhik TO all: from now on EVERY change goes through a small PR to main, marked Ready for review (SOURCE_OF_TRUTH.md §10, v1.0.1). No direct pushes to main.
 [backend-audit] FROM hardhik TO gangu: data_utils/schemas.py LeakSimulationRequest.seed is now Field(None, ge=0) (negative seeds crashed numpy â†’ 500). Keep this when you replace the stand-in. ACTION: tests/test_contract.py should expect 422 for seed < 0.
 [backend-audit] FROM hardhik TO badri: no API shape change. A negative seed now returns 422 (array detail), not 500.
 [H00:30] FROM gangu TO everyone: Repo scaffold complete with SOURCE_OF_TRUTH.md, .gitignore, Makefile, requirements.txt, and scripts. ACTION: none.

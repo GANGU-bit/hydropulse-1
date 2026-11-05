@@ -253,13 +253,10 @@ post "NETWORK REGENERATED" in chat.
     Stack follow-up PRs on top of an unmerged one rather than growing it.
   - Branch from the latest `main` (or from the PR you stack on). Names: `feat/<area>-<topic>`, `fix/<area>-<topic>`,
     `docs/<topic>`; agent branches may use the name their platform assigns.
-  - Open the PR as a draft while working, then mark it **Ready for review**. The Jules reviewer
-    (`.github/workflows/jules-pr-review.yml`) runs only on non-draft, same-repo PRs that target `main`; a stacked PR is
-    reviewed once it is retargeted to `main`.
+  - Open the PR as a draft while working, then mark it **Ready for review**.
   - PR description: what changed, why, how it was verified (exact commands + results), what was NOT verified, and any
     deviation from this file. Run your role's §12 checks before marking it ready.
-  - Jules is advisory: High/Warning findings must be fixed or answered in the PR before merge; it never blocks a merge
-    on its own. Hardhik reviews and merges (squash or merge commit, never a force-push to `main`).
+  - Hardhik reviews and merges (squash or merge commit, never a force-push to `main`).
 - Work on your branch. `git pull --rebase origin main` at least every 2 hours and before every push.
 - Small, frequent commits with the prefixes from §5. One logical change per commit.
 - Merge conflicts: the owner of the folder (§2) decides. Never "accept both" in JSON or lockfiles. Regenerate instead.
@@ -324,4 +321,4 @@ post "NETWORK REGENERATED" in chat.
 | Version | Time | Author  | Change                          |
 |---------|------|---------|---------------------------------|
 | 1.0.0   | H0   | Hardhik | Initial frozen contract and rules |
-| 1.0.1   | backend MVP | Hardhik | Non-breaking. §10: all changes via PRs reviewed by Jules. §1: candidate screening is a size-aware fingerprint fit (cosine-only screening scored 27.5% top-1 at 0% noise in the benchmark); no API field changed. `seed` must be ≥ 0 (negative seeds were a 500, now a 422) |
+| 1.0.1   | backend MVP | Hardhik | Non-breaking. §1: candidate screening is a size-aware fingerprint fit (cosine-only screening scored 27.5% top-1 at 0% noise in the benchmark); no API field changed. `seed` must be ≥ 0 (negative seeds were a 500, now a 422) |
