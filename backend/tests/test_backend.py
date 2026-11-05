@@ -158,6 +158,35 @@ def test_api_validation_422(client, area):
     assert isinstance(r.json()["detail"], list)
 
 
+def test_api_negative_seed_is_422_not_500(client):
+    j = client.get("/api/health").json()["sensor_ids"][0]
+    r = client.post("/api/simulate-leak", json={"target_node_id": j, "seed": -1})
+    assert r.status_code == 422
+    assert isinstance(r.json()["detail"], list)
+
+
+def test_api_internal_keyerror_is_500_not_404(client, monkeypatch):
+    from backend import main
+
+    def boom(*_a, **_k):
+        raise KeyError("internal")
+
+    monkeypatch.setattr(main.engine, "simulate_and_triangulate", boom)
+    j = client.get("/api/health").json()["sensor_ids"][0]
+    r = client.post("/api/simulate-leak", json={"target_node_id": j})
+    assert r.status_code == 500
+    assert r.json()["detail"].startswith("Simulation failed:")
+
+
+def test_unconverged_solve_raises(engine, monkeypatch):
+    class Fake:
+        error_code = 1
+
+    monkeypatch.setattr("wntr.sim.WNTRSimulator.run_sim", lambda self, **kw: Fake())
+    with pytest.raises(RuntimeError):
+        engine._solve()
+
+
 def test_api_isolate_unknown_pipe_404(client):
     j = client.get("/api/health").json()["sensor_ids"][0]
     r = client.post("/api/isolate", json={"valve_ids": ["NOPE"], "target_node_id": j, "leak_area_cm2": 25})

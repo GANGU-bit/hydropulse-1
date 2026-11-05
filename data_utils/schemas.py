@@ -82,7 +82,7 @@ class LeakSimulationRequest(BaseModel):
     target_node_id: str = Field(min_length=1)
     leak_area_cm2: float = Field(25.0, ge=0.5, le=100)
     noise_pct: float = Field(1.5, ge=0, le=10)
-    seed: int | None = None
+    seed: int | None = Field(None, ge=0)  # numpy default_rng rejects negative seeds
 
 
 class CandidateNode(BaseModel):

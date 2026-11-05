@@ -57,6 +57,12 @@ def _engine() -> HydraulicEngine:
     return engine
 
 
+def _require_junction(eng: HydraulicEngine, node_id: str) -> None:
+    """Contract 404 for anything that is not a junction (reservoirs/tanks included)."""
+    if node_id not in eng.junctions:
+        raise HTTPException(status_code=404, detail=f"Unknown junction id: {node_id}")
+
+
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> dict:
     return _engine().health()
@@ -89,10 +95,9 @@ def presets() -> dict:
 @app.post("/api/simulate-leak", response_model=LeakSimulationResponse)
 def simulate_leak(req: LeakSimulationRequest) -> dict:
     eng = _engine()
+    _require_junction(eng, req.target_node_id)
     try:
         out = eng.simulate_and_triangulate(req.target_node_id, req.leak_area_cm2, req.noise_pct, req.seed)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Unknown junction id: {req.target_node_id}")
     except Exception as exc:  # solver failure → contract 500 shape
         log.exception("simulation failed")
         raise HTTPException(status_code=500, detail=f"Simulation failed: {exc}")
@@ -106,12 +111,12 @@ def simulate_leak(req: LeakSimulationRequest) -> dict:
 def isolate(req: IsolationRequest) -> dict:
     """(stretch) Close valves with the leak present and report the resulting pressures."""
     eng = _engine()
+    _require_junction(eng, req.target_node_id)
+    unknown = [v for v in req.valve_ids if v not in eng.wn.link_name_list]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"Unknown pipe id: {unknown[0]}")
     try:
         return eng.simulate_isolation(req.valve_ids, req.target_node_id, req.leak_area_cm2)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Unknown junction id: {req.target_node_id}")
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=f"Unknown pipe id: {exc.args[0]}")
     except Exception as exc:
         log.exception("isolation failed")
         raise HTTPException(status_code=500, detail=f"Simulation failed: {exc}")
