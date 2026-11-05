@@ -49,6 +49,8 @@ hydropulse/                          # git root (Gangu creates it at H0)
 
 **Git rules:** one branch per person (`feat/backend`, `feat/utils`, `feat/frontend`, `feat/pitch`). Hardhik merges into `main`. Nobody edits a folder they don't own without telling its owner.
 
+**PR workflow (mandatory from the backend MVP onward):** every change lands on `main` through a small pull request: one logical change, stacked if it builds on an unmerged PR. Mark it *Ready for review* so the advisory Jules reviewer runs (it skips drafts and only reviews PRs that target `main`). Fix or answer every Jules High/Warning finding, then Hardhik merges. No direct pushes to `main`. Full rules: `SOURCE_OF_TRUTH.md` §10.
+
 ---
 
 ## 3. Shared API contract v1.0 (frozen at H1)
@@ -117,7 +119,7 @@ flowchart LR
 
 ````markdown
 # HydroPulse: SOURCE OF TRUTH
-Version: 1.0.0 · Contract owner: Hardhik · Last updated: H0 · Status: FROZEN after CP2 (H13)
+Version: 1.0.1 · Contract owner: Hardhik · Last updated: backend MVP · Status: FROZEN after CP2 (H13)
 
 > This file is the single source of truth for every human and AI agent working on HydroPulse.
 > If code, a prompt, a plan, a chat message or an agent's assumption disagrees with this file, THIS FILE WINS
@@ -142,8 +144,8 @@ Version: 1.0.0 · Contract owner: Hardhik · Last updated: H0 · Status: FROZEN 
 HydroPulse is a software-only hydraulic digital twin for Lakshya 2026 (SJBIT, Track 02). It turns Kengeri
 OpenStreetMap streets into an EPANET pipe network, simulates a pipe burst with US EPA WNTR (pressure-driven
 demand, Torricelli orifice leak), watches only 5 sentinel junctions (betweenness centrality with hop separation),
-matches the 5-sensor pressure-drop fingerprint against a precomputed sensitivity matrix (cosine similarity, then
-a verification re-simulation), pinpoints the leaking junction, reports the loss in LPM and BWSSB tankers per day,
+matches the 5-sensor pressure-drop fingerprint against precomputed fingerprints (a size-aware fit over a grid of
+leak areas, then a verification re-simulation; cosine similarity drives the heatmap), pinpoints the leaking junction, reports the loss in LPM and BWSSB tankers per day,
 and recommends valves to close. No hardware.
 
 ---------------------------------------------------------------------------------------------------
@@ -366,6 +368,18 @@ post "NETWORK REGENERATED" in chat.
 ---------------------------------------------------------------------------------------------------
 ## 10. Git workflow
 - `main` must always run. Only Hardhik merges into `main`. Never force-push `main`.
+- **Every change reaches `main` through a pull request. Nobody (human or agent) pushes to `main` directly.**
+  - One PR = one logical change, kept small (aim for under ~400 changed lines, generated files excluded).
+    Stack follow-up PRs on top of an unmerged one rather than growing it.
+  - Branch from the latest `main` (or from the PR you stack on). Names: `feat/<area>-<topic>`, `fix/<area>-<topic>`,
+    `docs/<topic>`; agent branches may use the name their platform assigns.
+  - Open the PR as a draft while working, then mark it **Ready for review**. The Jules reviewer
+    (`.github/workflows/jules-pr-review.yml`) runs only on non-draft, same-repo PRs that target `main`; a stacked PR is
+    reviewed once it is retargeted to `main`.
+  - PR description: what changed, why, how it was verified (exact commands + results), what was NOT verified, and any
+    deviation from this file. Run your role's §12 checks before marking it ready.
+  - Jules is advisory: High/Warning findings must be fixed or answered in the PR before merge; it never blocks a merge
+    on its own. Hardhik reviews and merges (squash or merge commit, never a force-push to `main`).
 - Work on your branch. `git pull --rebase origin main` at least every 2 hours and before every push.
 - Small, frequent commits with the prefixes from §5. One logical change per commit.
 - Merge conflicts: the owner of the folder (§2) decides. Never "accept both" in JSON or lockfiles. Regenerate instead.
@@ -430,6 +444,7 @@ post "NETWORK REGENERATED" in chat.
 | Version | Time | Author  | Change                          |
 |---------|------|---------|---------------------------------|
 | 1.0.0   | H0   | Hardhik | Initial frozen contract and rules |
+| 1.0.1   | backend MVP | Hardhik | Non-breaking. §10: all changes via PRs reviewed by Jules. §1: candidate screening is a size-aware fingerprint fit (cosine-only screening scored 27.5% top-1 at 0% noise in the benchmark); no API field changed. `seed` must be ≥ 0 (negative seeds were a 500, now a 422) |
 ````
 
 **`AGENTS.md`** (repo root; many coding agents read this automatically):
