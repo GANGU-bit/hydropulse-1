@@ -1,0 +1,47 @@
+# Git and repository metadata
+.git
+.gitignore
+.gitattributes
+.github
+
+# Local virtual environments and Python caches
+.venv
+venv
+ENV
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Environment secrets and local overrides (NEVER bake into image)
+.env
+.env.*
+!.env.example
+
+# Ephemeral runtime caches and state (rebuilt or mounted at runtime)
+backend/.osm_cache/
+backend/.state/
+backend/sensitivity_matrix*.npy
+backend/sensitivity_matrix*.json
+*.tmp
+
+# Frontend and presentation assets (deployed separately)
+frontend/
+node_modules/
+package.json
+package-lock.json
+.node-version
+
+# Tests and development documentation
+tests/
+backend/tests/
+docs/
+00_master_plan.md
+01_hardhik_plan.md
+02_gangu_plan.md
+03_badri_plan.md
+04_jasmine_plan.md
+HANDOFF.md
+RUN_OF_SHOW.md

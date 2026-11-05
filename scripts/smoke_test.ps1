@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.5 seconds
-Output:
 # HydroPulse Smoke Test (PowerShell)
 $ErrorActionPreference = "Stop"
 
@@ -83,8 +80,23 @@ try {
         exit 1
     }
 }
+# 7. What-If (v1.1)
+Write-Host -NoNewline "[7/9] Testing POST /api/what-if ... "
+$whatIfBody = @{ scenario_name = "Smoke What-If"; demand_multiplier = 1.15; reservoir_head_delta_m = 2.0 } | ConvertTo-Json
+$whatIf = Invoke-RestMethod -Uri "$BASE/api/what-if" -Method Post -Body $whatIfBody -ContentType "application/json"
+Write-Host "PASSED (rev=$($whatIf.network_revision))" -ForegroundColor Green
+
+# 8. IoT & Pipe condition (v1.1)
+Write-Host -NoNewline "[8/9] Testing GET /api/iot/state & /api/pipes/condition ... "
+$iot = Invoke-RestMethod -Uri "$BASE/api/iot/state?demo_tick=true&seed=42" -Method Get
+$pipes = Invoke-RestMethod -Uri "$BASE/api/pipes/condition" -Method Get
+Write-Host "PASSED ($($pipes.pipes.Count) pipes)" -ForegroundColor Green
+
+# 9. AI Advisor suggestions (v1.1)
+Write-Host -NoNewline "[9/9] Testing GET /api/ai/suggestions ... "
+$ai = Invoke-RestMethod -Uri "$BASE/api/ai/suggestions" -Method Get
+Write-Host "PASSED ($($ai.suggestions.Count) suggestions)" -ForegroundColor Green
 
 Write-Host "=================================================="
 Write-Host "    ALL SMOKE TESTS PASSED SUCCESSFULLY!          " -ForegroundColor Green
 Write-Host "=================================================="
-

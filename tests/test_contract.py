@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.9 seconds
-Output:
 """
 API Contract tests for HydroPulse live backend.
 Validates live HTTP responses against Pydantic models from data_utils.schemas.
@@ -8,24 +5,30 @@ Skips automatically if the backend is not reachable.
 """
 
 import os
+import re
 import sys
 import time
 from pathlib import Path
 import pytest
 import requests
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_utils.schemas import (
+    AutoValveResponse,
     HealthResponse,
-    NetworkResponse,
-    PresetsResponse,
+    IntelliSenseResponse,
+    IoTStateResponse,
     LeakSimulationResponse,
+    NetworkPresetsListResponse,
+    NetworkResponse,
+    PipeConditionResponse,
+    PresetsResponse,
+    TelemetryIngestResponse,
+    WhatIfResponse,
     lpm_to_tankers_per_day,
 )
-
 BASE_URL = os.environ.get("BASE", "http://localhost:8000").rstrip("/")
 
 
@@ -202,4 +205,229 @@ def test_simulate_leak_validation_errors():
         timeout=2.0,
     )
     assert r_422_seed.status_code == 422
+
+
+def test_v1_1_revision_metadata():
+    """Verify v1.1 network_revision and revision_meta contracts on /api/health and /api/network."""
+    # 1. Health endpoint revision invariants
+    r_health = requests.get(f"{BASE_URL}/api/health", timeout=2.0)
+    assert r_health.status_code == 200
+    h_model = HealthResponse.model_validate(r_health.json())
+    assert h_model.network_revision is not None
+    assert re.match(r"^rev-\d+-[0-9a-f]{8}$", h_model.network_revision)
+    assert h_model.source in ["synthetic", "osm", "imported_inp", "imported_geojson", "ward_preset", "net3_fallback"]
+    assert isinstance(h_model.can_rollback, bool)
+
+    # 2. Network endpoint revision metadata
+    r_net = requests.get(f"{BASE_URL}/api/network", timeout=2.0)
+    assert r_net.status_code == 200
+    net_model = NetworkResponse.model_validate(r_net.json())
+    assert net_model.network_revision == h_model.network_revision
+    meta = net_model.revision_meta
+    assert meta is not None
+    assert meta.network_revision == h_model.network_revision
+    assert meta.crs == "EPSG:4326"
+    assert meta.num_nodes == len(net_model.nodes)
+    assert meta.num_pipes == len(net_model.pipes)
+    assert isinstance(meta.validation_summary, dict)
+
+
+def test_v1_1_what_if_and_immutability():
+    """Verify POST /api/what-if contract, validation gates, and active network immutability."""
+    # 1. Capture baseline state
+    r_net_before = requests.get(f"{BASE_URL}/api/network", timeout=2.0)
+    assert r_net_before.status_code == 200
+    net_before = r_net_before.json()
+    rev_before = net_before["network_revision"]
+    pipe0 = net_before["pipes"][0]
+
+    r_sim_before = requests.post(
+        f"{BASE_URL}/api/simulate-leak",
+        json={"target_node_id": "J15", "leak_area_cm2": 25.0, "noise_pct": 1.5, "seed": 42},
+        timeout=5.0,
+    )
+    assert r_sim_before.status_code == 200
+    sim_before = r_sim_before.json()
+
+    # 2. Empty / no-op what-if scenario
+    r_noop = requests.post(f"{BASE_URL}/api/what-if", json={}, timeout=5.0)
+    assert r_noop.status_code == 200
+    noop_model = WhatIfResponse.model_validate(r_noop.json())
+    assert noop_model.converged is True
+    max_delta = max(abs(v) for v in noop_model.node_pressure_deltas_m.values())
+    assert max_delta < 1e-3, f"Expected no-op delta < 1e-3, got {max_delta}"
+
+    # 3. Active what-if with pipe override, demand multiplier, reservoir head, and leaks
+    r_active = requests.post(
+        f"{BASE_URL}/api/what-if",
+        json={
+            "pipe_overrides": [{"pipe_id": pipe0["id"], "status": "CLOSED", "diameter_mm": 200.0, "roughness": 110.0}],
+            "demand_multiplier": 1.2,
+            "reservoir_head_delta_m": -5.0,
+            "leaks": [{"node_id": "J15", "leak_area_cm2": 25.0}],
+            "seed": 42,
+        },
+        timeout=5.0,
+    )
+    assert r_active.status_code == 200
+    active_model = WhatIfResponse.model_validate(r_active.json())
+    assert active_model.converged is True
+    assert active_model.scenario.total_leak_loss_lpm > 0.0
+    assert len(active_model.pipe_warnings) > 0
+    assert len(active_model.limitations) >= 3
+
+    # 4. Immutability: active network and subsequent leak simulations remain identical
+    r_net_after = requests.get(f"{BASE_URL}/api/network", timeout=2.0)
+    assert r_net_after.status_code == 200
+    net_after = r_net_after.json()
+    assert net_after["network_revision"] == rev_before
+    pipe0_after = [p for p in net_after["pipes"] if p["id"] == pipe0["id"]][0]
+    assert pipe0_after["status"] == "OPEN"
+
+    r_sim_after = requests.post(
+        f"{BASE_URL}/api/simulate-leak",
+        json={"target_node_id": "J15", "leak_area_cm2": 25.0, "noise_pct": 1.5, "seed": 42},
+        timeout=5.0,
+    )
+    assert r_sim_after.status_code == 200
+    sim_after = r_sim_after.json()
+    for field in ("actual_loss_lpm", "predicted_top_candidates", "sensor_readings", "node_heatmap"):
+        assert sim_before[field] == sim_after[field]
+
+    # 5. Validation gates
+    assert requests.post(f"{BASE_URL}/api/what-if", json={"pipe_overrides": [{"pipe_id": "P_NONEXISTENT"}]}, timeout=2.0).status_code == 404
+    assert requests.post(f"{BASE_URL}/api/what-if", json={"leaks": [{"node_id": "J_NONEXISTENT", "leak_area_cm2": 25.0}]}, timeout=2.0).status_code == 404
+    assert requests.post(f"{BASE_URL}/api/what-if", json={"leaks": [{"node_id": "J1", "leak_area_cm2": 25.0}] * 6}, timeout=2.0).status_code == 422
+    assert requests.post(f"{BASE_URL}/api/what-if", json={"demand_multiplier": 0.1}, timeout=2.0).status_code == 422
+    assert requests.post(f"{BASE_URL}/api/what-if", json={"expected_network_revision": "rev-999-stale"}, timeout=2.0).status_code == 409
+
+
+def test_v1_1_network_presets_and_intellisense():
+    """Verify GET /api/network/presets and POST /api/network/intellisense contracts and validation gates."""
+    # 1. Presets catalog
+    r_presets = requests.get(f"{BASE_URL}/api/network/presets", timeout=2.0)
+    assert r_presets.status_code == 200
+    presets_model = NetworkPresetsListResponse.model_validate(r_presets.json())
+    preset_map = {p.preset_id: p for p in presets_model.presets}
+    assert "kengeri_baseline" in preset_map and preset_map["kengeri_baseline"].available is True
+    assert "jayanagar_dma" in preset_map and preset_map["jayanagar_dma"].available is False
+    assert "indiranagar_dma" in preset_map and preset_map["indiranagar_dma"].available is False
+
+    # 2. IntelliSense
+    r_net = requests.get(f"{BASE_URL}/api/network", timeout=2.0)
+    assert r_net.status_code == 200
+    net = r_net.json()
+    rev = net["network_revision"]
+    j0 = [n for n in net["nodes"] if n["type"] == "junction"][0]["id"]
+    j1 = [n for n in net["nodes"] if n["type"] == "junction"][1]["id"]
+
+    r_intel = requests.post(
+        f"{BASE_URL}/api/network/intellisense",
+        json={"from_node_id": j0, "to_node_id": j1, "expected_network_revision": rev},
+        timeout=2.0,
+    )
+    assert r_intel.status_code == 200
+    intel_model = IntelliSenseResponse.model_validate(r_intel.json())
+    assert intel_model.length_m > 0.0
+    assert intel_model.recommended_diameter_mm in [110, 150, 200, 250, 300, 400]
+    assert intel_model.predicted_velocity_ms >= 0.0
+    assert intel_model.predicted_headloss_m >= 0.0
+    assert isinstance(intel_model.loop_candidates, list)
+
+    # IntelliSense validation gates
+    assert requests.post(f"{BASE_URL}/api/network/intellisense", json={"from_node_id": "J_NONEXISTENT"}, timeout=2.0).status_code == 404
+    assert requests.post(f"{BASE_URL}/api/network/intellisense", json={"from_node_id": j0, "expected_network_revision": "rev-999-stale"}, timeout=2.0).status_code == 409
+
+
+def test_v1_1_iot_and_pipe_condition_contracts():
+    """Verify IoT state/telemetry ingest, pipe condition/RUL transparency, and auto-valve state machine."""
+    # 1. IoT state query
+    r_iot = requests.get(f"{BASE_URL}/api/iot/state?demo_tick=true&seed=42", timeout=2.0)
+    assert r_iot.status_code == 200
+    iot_model = IoTStateResponse.model_validate(r_iot.json())
+    assert iot_model.auto_valve_enabled is False
+    assert len(iot_model.latest_readings) > 0
+    for pkt in iot_model.latest_readings.values():
+        assert pkt.quality == "SIMULATED"
+        assert pkt.source_type == "simulator"
+
+    # 2. Telemetry Ingest with deduplication and validation
+    unique_src = f"sensor_contract_{int(time.time() * 1000)}"
+    valid_pkt = {
+        "source_id": unique_src,
+        "source_type": "simulator",
+        "network_revision": iot_model.network_revision,
+        "observed_at_utc": "2026-11-05T12:00:00Z",
+        "target_id": "J72",
+        "measurement_type": "pressure_m",
+        "value": 37.0,
+        "unit": "m",
+        "sequence_id": 999,
+        "quality": "SIMULATED",
+    }
+    dup_pkt = dict(valid_pkt)
+    bad_tgt_pkt = dict(valid_pkt, source_id="bad_tgt", target_id="NONEXISTENT", sequence_id=1000)
+    bad_unit_pkt = dict(valid_pkt, source_id="bad_unit", unit="m3h", sequence_id=1001)
+    stale_rev_pkt = dict(valid_pkt, source_id="stale_rev", network_revision="rev-999-bad", sequence_id=1002)
+
+    r_ingest = requests.post(
+        f"{BASE_URL}/api/iot/ingest",
+        json={"packets": [valid_pkt, dup_pkt, bad_tgt_pkt, bad_unit_pkt, stale_rev_pkt]},
+        timeout=2.0,
+    )
+    assert r_ingest.status_code == 200
+    ingest_model = TelemetryIngestResponse.model_validate(r_ingest.json())
+    assert ingest_model.accepted >= 1
+    assert ingest_model.deduplicated >= 1
+    assert ingest_model.rejected >= 1
+
+    # 3. Pipe Condition / RUL transparency
+    r_pipes = requests.get(f"{BASE_URL}/api/pipes/condition", timeout=2.0)
+    assert r_pipes.status_code == 200
+    pipes_model = PipeConditionResponse.model_validate(r_pipes.json())
+    assert pipes_model.rul_available is False
+    assert len(pipes_model.methodology_note) > 0
+    assert len(pipes_model.pipes) > 0
+    for p in pipes_model.pipes:
+        assert p.rul_status == "unavailable"
+        assert p.rul_years is None
+        assert 0.0 <= p.illustrative_stress_index <= 1.0
+        assert len(p.missing_inputs) > 0
+
+    # 4. Safe Auto-Valve State Machine
+    rev = iot_model.network_revision
+    # Refused by default
+    r_refused = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "confirm": True}, timeout=2.0)
+    assert r_refused.status_code == 200
+    assert r_refused.json()["status"] == "refused"
+
+    # Enable mode
+    r_enable = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "set_mode", "enable_auto_valve": True}, timeout=2.0)
+    assert r_enable.status_code == 200
+    assert r_enable.json()["auto_valve_enabled"] is True
+
+    # Propose
+    r_prop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "propose", "target_node_id": "J15", "leak_area_cm2": 25.0}, timeout=2.0)
+    assert r_prop.status_code == 200
+    prop_data = r_prop.json()
+    assert prop_data["status"] == "proposed"
+    proposal_id = prop_data["proposal"]["proposal_id"]
+
+    # Confirm close
+    r_conf = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "proposal_id": proposal_id, "confirm": True}, timeout=2.0)
+    assert r_conf.status_code == 200
+    assert r_conf.json()["status"] == "closed_in_simulation"
+    assert r_conf.json()["simulation_only"] is True
+
+    # Emergency stop
+    r_estop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "emergency_stop"}, timeout=2.0)
+    assert r_estop.status_code == 200
+    assert r_estop.json()["status"] == "stopped"
+    assert r_estop.json()["emergency_stop"] is True
+
+    # Reset valves
+    r_reset = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "reset_valves"}, timeout=2.0)
+    assert r_reset.status_code == 200
+    assert r_reset.json()["status"] == "reset"
+    assert r_reset.json()["active_valve_closures"] == []
 

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.7 seconds
-Output:
 # HydroPulse ðŸ’§âš¡
 
 **Software-Only Municipal Hydraulic Digital Twin for Pipe Burst Triangulation**
@@ -105,25 +102,45 @@ make frontend
 
 ---
 
-## 5. API Endpoints (Contract v1.0)
+## 5. API Endpoints (Contract v1.0 & Additive v1.1)
 
+### Core v1.0 Endpoints
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
-| `GET` | `/api/health` | Health check, sensor list, matrix readiness |
-| `GET` | `/api/network` | Nodes, pipes, coordinates, base pressures, demands |
-| `GET` | `/api/presets` | 3 curated demo presets |
+| `GET` | `/api/health` | Health check, sensor list, matrix readiness, active `network_revision` |
+| `GET` | `/api/ready` | Production readiness probe (HTTP 200 when baseline + sensitivity matrix ready) |
+| `GET` | `/api/network` | Nodes, pipes, coordinates, base pressures, demands, and `revision_meta` |
+| `GET` | `/api/presets` | 3 curated demo leak presets |
 | `POST` | `/api/simulate-leak` | Inject leak, triangulate location, calculate loss & valve isolation |
-| `POST` | `/api/isolate` *(stretch)* | Compute remaining pressure after closing valves |
+| `POST` | `/api/isolate` | Compute remaining pressure after closing valves |
+
+### Additive v1.1 Endpoints (What-If, Network Builder, AI Advisor, IoT & RUL)
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/what-if` | Stateless counterfactual scenario simulation (pipe closures, demand scaling, reservoir head) |
+| `GET` | `/api/network/presets` | Built-in ward network topology presets |
+| `POST` | `/api/network/import/preview` | Safe EPANET `.inp` & GeoJSON preview validation (`POST /api/network/import` alias supported) |
+| `POST` | `/api/network/import/commit` | Commit validated import preview to active twin (`confirm=True` required) |
+| `POST` | `/api/network/build/preview` | Preview custom junctions & pipes before committing |
+| `POST` | `/api/network/build/commit` | Commit previewed network build (`confirm=True` required) |
+| `POST` | `/api/network/intellisense` | Real-time Hazen-Williams diameter, roughness, and elevation IntelliSense |
+| `POST` | `/api/network/reset` | Roll back active network to `"previous"` or `"baseline"` (`confirm=True` required) |
+| `GET` | `/api/ai/suggestions` | Physics-backed engineering recommendations + optional OpenRouter `:free` narrative enrichment |
+| `POST` | `/api/ai/apply-suggestion` | Apply an AI structural or sensor recommendation (`confirm=True` required) |
+| `POST` | `/api/iot/ingest` | Ingest simulated/live sensor telemetry packets with deduplication & staleness checks |
+| `GET` | `/api/iot/state` | Current telemetry state, anomaly flags, and human-in-the-loop auto-valve proposals |
+| `GET` | `/api/pipes/condition` | Honest hydraulic load index & material/age-conditioned RUL assessment |
+| `POST` | `/api/iot/auto-valve` | Two-phase human-in-the-loop isolation valve control (`propose`, `confirm_close`, `emergency_stop`, `reset_valves`) |
 
 ---
 
-## 6. Testing & Demo Insurance
+## 6. Testing, Production Deployment & Demo Insurance
 
 ```bash
-# Run contract and unit tests
+# Run full backend, Part 2, deployment readiness, and contract test suites
 make test
 
-# Run API smoke test against running backend
+# Run API smoke test (v1.0 + v1.1 endpoints) against running backend
 make smoke
 
 # Regenerate mock fixtures for frontend
@@ -133,11 +150,12 @@ make fixtures
 make snapshot
 ```
 
+For production Linux setup, environment variables (`.env.example`), security hardening, OpenRouter configuration, and Docker container packaging, see **[`DEPLOYMENT.md`](DEPLOYMENT.md)**.
+
 ---
 
 ## 7. Troubleshooting
 
-- **CORS Errors**: Always access the UI via `http://localhost:5173` which proxies `/api` requests to backend port 8000.
+- **CORS Errors**: Always access the UI via `http://localhost:5173` (or configure `HYDROPULSE_CORS_ORIGINS` in production).
 - **Port Conflicts**: Ensure port 8000 (backend) and 5173 (frontend) are free before launching.
-- **Offline Venue Setup**: See `RUN_OF_SHOW.md` for full instructions to run HydroPulse completely offline without internet connection.
-
+- **Offline Venue Setup**: See `RUN_OF_SHOW.md` for full instructions to run HydroPulse completely offline without an internet connection.

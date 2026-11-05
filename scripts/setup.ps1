@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 5.6 seconds
-Output:
 # HydroPulse Environment Setup (PowerShell)
 $ErrorActionPreference = "Stop"
 

@@ -1,12 +1,9 @@
-Exit code: 0
-Wall time: 4.1 seconds
-Output:
 """
 Pydantic v2 schemas for HydroPulse.
 Mirrors SOURCE_OF_TRUTH.md API CONTRACT v1.0 exactly.
 """
 
-from typing import Annotated, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, ConfigDict
 
 # Constants from SOURCE_OF_TRUTH.md Â§6
@@ -100,6 +97,21 @@ class NetworkPipe(BaseModel):
     )
 
 
+class NetworkRevisionMeta(BaseModel):
+    """Metadata describing a network revision snapshot."""
+    network_id: str = Field(..., description="Logical network identifier")
+    network_revision: str = Field(..., description="Immutable revision token, e.g. rev-1-<sha8>")
+    source_type: Literal["synthetic", "osm", "imported_inp", "imported_geojson", "ward_preset", "net3_fallback"] = Field("synthetic")
+    source_filename: Optional[str] = None
+    sha256: Optional[str] = None
+    crs: str = "EPSG:4326"
+    created_at_utc: str = Field(..., description="ISO-8601 UTC timestamp")
+    num_nodes: int = Field(..., ge=1)
+    num_pipes: int = Field(..., ge=1)
+    can_rollback: bool = False
+    validation_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
 class NetworkResponse(BaseModel):
     """Full network representation for visualization."""
     network_name: str = Field(..., description="Name of the network (e.g. bangalore_kengeri)")
@@ -107,6 +119,8 @@ class NetworkResponse(BaseModel):
     sensor_ids: List[str] = Field(..., description="IDs of sentinel sensors")
     nodes: List[NetworkNode] = Field(..., description="List of all nodes in network")
     pipes: List[NetworkPipe] = Field(..., description="List of all pipes in network")
+    network_revision: Optional[str] = None
+    revision_meta: Optional[NetworkRevisionMeta] = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -129,6 +143,9 @@ class HealthResponse(BaseModel):
     num_pipes: int = Field(..., description="Number of pipes")
     sensor_ids: List[str] = Field(..., description="5 sentinel sensor node IDs")
     matrix_ready: bool = Field(..., description="Whether sensitivity matrix is computed and ready")
+    network_revision: Optional[str] = None
+    source: Optional[str] = None
+    can_rollback: bool = False
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -196,9 +213,7 @@ class LeakSimulationRequest(BaseModel):
     target_node_id: str = Field(..., min_length=1, description="Junction ID to inject leak into")
     leak_area_cm2: float = Field(25.0, ge=0.5, le=100.0, description="Leak orifice area in cm2")
     noise_pct: float = Field(1.5, ge=0.0, le=10.0, description="Gaussian noise level added to sensors (0..10%)")
-    seed: Optional[int] = Field(
-        None, ge=0, description="Optional non-negative RNG seed for deterministic noise"
-    )
+    seed: Optional[int] = Field(None, ge=0, description="Optional non-negative RNG seed for deterministic noise")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -269,6 +284,7 @@ class LeakSimulationResponse(BaseModel):
     affected_households_after_isolation: int = Field(..., description="Total households cut off after isolation")
     localization_error_m: float = Field(..., description="Haversine distance in meters between injected and top candidate")
     compute_time_ms: float = Field(..., description="Total calculation time in milliseconds")
+    network_revision: Optional[str] = None
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -335,4 +351,310 @@ class IsolationResponse(BaseModel):
             }
         }
     )
+
+
+# ==============================================================================
+# Part 2 Additive Schemas (v1.1)
+# ==============================================================================
+
+# --- What-If Scenario Analysis ---
+
+class WhatIfPipeOverride(BaseModel):
+    pipe_id: str
+    status: Optional[Literal["OPEN", "CLOSED"]] = None
+    diameter_mm: Optional[float] = Field(None, ge=25.0, le=2000.0)
+    roughness: Optional[float] = Field(None, ge=40.0, le=200.0)
+
+
+class WhatIfLeakInjection(BaseModel):
+    node_id: str
+    leak_area_cm2: float = Field(25.0, ge=0.5, le=100.0)
+
+
+class WhatIfRequest(BaseModel):
+    pipe_overrides: List[WhatIfPipeOverride] = Field(default_factory=list, max_length=25)
+    demand_multiplier: float = Field(1.0, ge=0.5, le=2.0)
+    reservoir_head_delta_m: float = Field(0.0, ge=-20.0, le=20.0)
+    leaks: List[WhatIfLeakInjection] = Field(default_factory=list, max_length=5)
+    seed: Optional[int] = Field(None, ge=0)
+    expected_network_revision: Optional[str] = None
+
+
+class PipeWarning(BaseModel):
+    pipe_id: str
+    warning_type: Literal["high_velocity", "low_velocity", "high_headloss", "closed"]
+    value: float
+    unit: str
+    message: str
+
+
+class WhatIfMetrics(BaseModel):
+    min_pressure_m: float
+    avg_pressure_m: float
+    max_pressure_m: float
+    pressure_deficit_nodes: int
+    unsupplied_nodes: List[str]
+    affected_households: int
+    total_leak_loss_lpm: float
+    tankers_lost_per_day: float
+
+
+class WhatIfResponse(BaseModel):
+    network_revision: str
+    converged: bool
+    solver_message: str
+    baseline: WhatIfMetrics
+    scenario: WhatIfMetrics
+    node_pressure_deltas_m: Dict[str, float]
+    scenario_node_pressures_m: Dict[str, float]
+    pipe_warnings: List[PipeWarning]
+    compute_time_ms: float
+    limitations: List[str]
+
+
+# --- AI Engineering Advisor ---
+
+class AiSuggestion(BaseModel):
+    suggestion_id: str
+    category: Literal["loop_completion", "pipe_upsizing", "sensor_placement"]
+    title: str
+    rationale: str
+    source_network_revision: str
+    status: Literal["proposed", "validated", "applied_to_simulation", "rejected", "stale"]
+    affected_node_ids: List[str]
+    affected_pipe_ids: List[str]
+    proposed_parameters: Dict[str, Any]
+    baseline_metrics: Dict[str, Any]
+    simulated_after_metrics: Dict[str, Any]
+    uncertainty_note: str
+
+
+class AiSuggestionsResponse(BaseModel):
+    network_revision: str
+    suggestions: List[AiSuggestion]
+    sensor_benchmark: Dict[str, Any]
+    compute_time_ms: float
+
+
+class ApplySuggestionRequest(BaseModel):
+    suggestion_id: str
+    expected_network_revision: str
+    confirm: bool = Field(..., description="Must be True to apply mutation")
+
+
+class ApplySuggestionResponse(BaseModel):
+    applied: bool
+    suggestion_id: str
+    previous_network_revision: str
+    new_network_revision: str
+    mutation_summary: str
+    metrics_before: Dict[str, Any]
+    metrics_after: Dict[str, Any]
+
+
+# --- Network Importer, Presets & Builder ---
+
+class NetworkPresetInfo(BaseModel):
+    preset_id: str
+    name: str
+    source_type: Literal["synthetic", "osm", "imported_inp", "imported_geojson", "ward_preset", "net3_fallback"]
+    available: bool
+    num_nodes: int
+    num_pipes: int
+    description: str
+    provenance: str
+
+
+class NetworkPresetsListResponse(BaseModel):
+    active_network_revision: str
+    presets: List[NetworkPresetInfo]
+
+
+class NetworkImportPreviewRequest(BaseModel):
+    format: Literal["inp", "geojson"]
+    filename: str = Field(..., min_length=1, max_length=128)
+    content: str = Field(..., min_length=2, max_length=2_000_000)
+    network_name: Optional[str] = Field(None, max_length=64)
+
+
+class NetworkImportPreviewResponse(BaseModel):
+    valid: bool
+    preview_token: Optional[str] = None
+    source_network_revision: str
+    proposed_meta: Optional[NetworkRevisionMeta] = None
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
+class NetworkImportCommitRequest(BaseModel):
+    preview_token: str
+    expected_network_revision: str
+    confirm: bool = True
+
+
+class NetworkRevisionCommitResponse(BaseModel):
+    committed: bool
+    previous_network_revision: str
+    new_network_revision: str
+    revision_meta: NetworkRevisionMeta
+    message: str
+
+
+class NetworkResetRequest(BaseModel):
+    target: Literal["previous", "baseline"] = "baseline"
+    confirm: bool = True
+
+
+class IntelliSenseRequest(BaseModel):
+    from_node_id: str
+    to_node_id: Optional[str] = None
+    new_junction_lat: Optional[float] = Field(None, ge=12.0, le=14.0)
+    new_junction_lng: Optional[float] = Field(None, ge=76.0, le=79.0)
+    target_velocity_ms: float = Field(1.0, ge=0.6, le=1.5)
+    roughness: float = Field(130.0, ge=40.0, le=200.0)
+    expected_network_revision: Optional[str] = None
+
+
+class IntelliSenseResponse(BaseModel):
+    network_revision: str
+    length_m: float
+    elevation_from_m: float
+    elevation_to_m: float
+    elevation_diff_m: float
+    slope_pct: float
+    elevation_provenance: str
+    estimated_downstream_demand_lps: float
+    estimated_households: int
+    recommended_diameter_mm: int
+    target_velocity_ms: float
+    predicted_velocity_ms: float
+    predicted_headloss_m: float
+    loop_candidates: List[Dict[str, Any]]
+    warnings: List[str]
+
+
+class BuildProposedNode(BaseModel):
+    id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    lat: float = Field(..., ge=12.0, le=14.0)
+    lng: float = Field(..., ge=76.0, le=79.0)
+    elevation_m: Optional[float] = Field(None, ge=500.0, le=1200.0)
+    base_demand_lps: float = Field(0.25, ge=0.0, le=20.0)
+
+
+class BuildProposedPipe(BaseModel):
+    id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{1,32}$")
+    from_node: str
+    to_node: str
+    diameter_mm: float = Field(..., ge=50.0, le=1200.0)
+    roughness: float = Field(130.0, ge=40.0, le=200.0)
+    road_class: Literal["primary", "secondary", "residential", "feeder"] = "residential"
+
+
+class NetworkBuildPreviewRequest(BaseModel):
+    new_nodes: List[BuildProposedNode] = Field(default_factory=list, max_length=20)
+    new_pipes: List[BuildProposedPipe] = Field(..., min_length=1, max_length=20)
+    expected_network_revision: Optional[str] = None
+
+
+class NetworkBuildPreviewResponse(BaseModel):
+    valid: bool
+    preview_token: Optional[str] = None
+    source_network_revision: str
+    before_metrics: Optional[WhatIfMetrics] = None
+    after_metrics: Optional[WhatIfMetrics] = None
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+
+
+class NetworkBuildCommitRequest(BaseModel):
+    preview_token: str
+    expected_network_revision: str
+    confirm: bool = True
+
+
+# --- IoT, Pipe Condition & Auto-Valve ---
+
+class TelemetryPacket(BaseModel):
+    source_id: str = Field(..., min_length=1, max_length=64)
+    source_type: Literal["simulator", "external_adapter"] = "simulator"
+    network_revision: str
+    observed_at_utc: str
+    sequence_id: int = Field(..., ge=1)
+    target_id: str
+    measurement_type: Literal["pressure_m", "flow_m3h", "demand_lps"]
+    value: float
+    unit: Literal["m", "m3h", "lps"]
+    quality: Literal["SIMULATED", "OK", "STALE", "OUT_OF_RANGE"] = "SIMULATED"
+
+
+class TelemetryIngestRequest(BaseModel):
+    packets: List[TelemetryPacket] = Field(..., min_length=1, max_length=50)
+
+
+class TelemetryIngestResponse(BaseModel):
+    accepted: int
+    rejected: int
+    deduplicated: int
+    errors: List[str]
+    active_network_revision: str
+
+
+class IoTStateResponse(BaseModel):
+    network_revision: str
+    stream_enabled: bool
+    stream_mode: Literal["SIMULATED", "OFF"]
+    seed: int
+    buffer_size: int
+    latest_readings: Dict[str, TelemetryPacket]
+    auto_valve_enabled: bool
+    emergency_stop: bool
+    active_valve_closures: List[str]
+    pending_valve_proposal: Optional[Dict[str, Any]] = None
+
+
+class PipeConditionItem(BaseModel):
+    pipe_id: str
+    from_node: str
+    to_node: str
+    diameter_mm: float
+    length_m: float
+    flow_m3h: float
+    velocity_ms: float
+    headloss_m_per_km: float
+    rul_status: Literal["unavailable", "estimated"] = "unavailable"
+    rul_years: Optional[float] = None
+    hoop_stress_mpa: Optional[float] = None
+    joukowsky_surge_m: Optional[float] = None
+    illustrative_stress_index: float
+    missing_inputs: List[str]
+    provenance_note: str
+
+
+class PipeConditionResponse(BaseModel):
+    network_revision: str
+    rul_available: bool = False
+    methodology_note: str
+    pipes: List[PipeConditionItem]
+
+
+class AutoValveRequest(BaseModel):
+    action: Literal["set_mode", "propose", "confirm_close", "emergency_stop", "reset_valves"]
+    enable_auto_valve: Optional[bool] = None
+    target_node_id: Optional[str] = None
+    leak_area_cm2: float = Field(25.0, ge=0.5, le=100.0)
+    proposal_id: Optional[str] = None
+    confirm: bool = False
+    expected_network_revision: Optional[str] = None
+
+
+class AutoValveResponse(BaseModel):
+    network_revision: str
+    auto_valve_enabled: bool
+    emergency_stop: bool
+    action_taken: str
+    status: Literal["idle", "proposed", "closed_in_simulation", "refused", "stopped", "reset"]
+    proposal: Optional[Dict[str, Any]] = None
+    active_valve_closures: List[str]
+    simulation_only: bool = True
+    message: str
 

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 4.4 seconds
-Output:
 """
 Geographic coordinate mapping and spatial utilities for HydroPulse.
 Handles conversion of arbitrary EPANET / WNTR (x,y) networks into
@@ -8,7 +5,7 @@ real Bengaluru / Kengeri coordinates.
 """
 
 import math
-from typing import Dict, Tuple, Any, Iterable
+from typing import Dict, Tuple, Any
 
 KENGERI_BBOX = dict(
     lat_min=12.9000,
@@ -201,18 +198,16 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return round(R * c, 2)
 
 
-def network_center(
-    latlngs: Dict[str, Tuple[float, float]] | Iterable[Tuple[float, float]],
-) -> Tuple[float, float]:
+def network_center(latlngs: Dict[str, Tuple[float, float]] | Any) -> Tuple[float, float]:
     """
-    Compute centroid (lat, lng) for a dict of node_id -> (lat, lng).
+    Compute centroid (lat, lng) for a dict of node_id -> (lat, lng) or an iterable of (lat, lng).
     """
-    points = list(latlngs.values()) if hasattr(latlngs, "values") else list(latlngs)
-    if not points:
+    pts = list(latlngs.values()) if isinstance(latlngs, dict) else list(latlngs or [])
+    if not pts:
         return (12.9081, 77.4852)
 
-    lats = [pt[0] for pt in points]
-    lngs = [pt[1] for pt in points]
+    lats = [pt[0] for pt in pts]
+    lngs = [pt[1] for pt in pts]
     return (round(sum(lats) / len(lats), 6), round(sum(lngs) / len(lngs), 6))
 
 

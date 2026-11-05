@@ -1,0 +1,104 @@
+# =============================================================================
+# HydroPulse Backend — Continuous Integration & Deployment Readiness Gate
+# Runs on push and pull_request to main.
+# Note: Never depends on a live external OpenRouter API key; OpenRouter is
+# tested with deterministic mocks and offline fallback in pytest.
+# =============================================================================
+name: HydroPulse Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "data_utils/**"
+      - "tests/**"
+      - "scripts/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Python 3.11 Backend & Contract Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HYDROPULSE_ENV: test
+      HYDROPULSE_OPENROUTER_ENABLED: "false"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 (64-bit)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies from requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Verify Python syntax & schema/geo_mapper self-checks
+        run: |
+          python -m py_compile backend/*.py data_utils/*.py
+          python data_utils/geo_mapper.py
+          python -c "from backend.config import load_config; cfg = load_config(); print(cfg.safe_summary())"
+
+      - name: Run full pytest suite (v1.0 + v1.1 + security + deployment readiness)
+        run: |
+          pytest -q backend/tests tests/test_data_utils.py tests/test_mock_fixtures.py
+
+      - name: Run live Uvicorn server + smoke_test.sh + test_contract.py
+        run: |
+          uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 40); do
+            if curl -sSf http://127.0.0.1:8000/api/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          BASE=http://127.0.0.1:8000 bash scripts/smoke_test.sh
+          BASE_URL=http://127.0.0.1:8000 pytest -q tests/test_contract.py
+
+  docker-build:
+    name: Container Image Build & Health Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: backend-tests
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: |
+          docker build -t hydropulse-backend:ci .
+
+      - name: Boot container & verify /api/health and /api/ready
+        run: |
+          docker run -d --name hydropulse-ci -p 8000:8000 \
+            -e HYDROPULSE_ENV=prod \
+            -e HYDROPULSE_RELOAD=false \
+            -e HYDROPULSE_CORS_ORIGINS=http://localhost:5173 \
+            -e HYDROPULSE_REQUIRE_ADMIN_AUTH=true \
+            -e HYDROPULSE_ADMIN_TOKEN=ci-verification-token-12345 \
+            hydropulse-backend:ci
+          trap "docker logs hydropulse-ci || true; docker rm -f hydropulse-ci >/dev/null 2>&1 || true" EXIT
+          for i in $(seq 1 45); do
+            if curl -sSf http://127.0.0.1:8000/api/ready >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sSf http://127.0.0.1:8000/api/health | python3 -m json.tool
+          curl -sSf http://127.0.0.1:8000/api/ready | python3 -m json.tool

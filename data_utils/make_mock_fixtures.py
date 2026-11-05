@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 2.6 seconds
-Output:
 """
 Generate realistic mock fixtures for HydroPulse frontend.
 Writes to frontend/public/mock/:

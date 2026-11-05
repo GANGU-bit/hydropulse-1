@@ -26,11 +26,13 @@ import json
 import logging
 import os
 import statistics
+import tempfile
 import threading
 import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
+from typing import Any, Optional
 import networkx as nx
 import numpy as np
 import wntr
@@ -88,6 +90,36 @@ def _net3_path() -> str:
     if not hits:
         raise FileNotFoundError("WNTR's bundled Net3.inp not found")
     return hits[0]
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically via a temporary file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:10]}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_save_npy(path: Path, arr: np.ndarray) -> None:
+    """Save a NumPy array atomically via a temporary .npy file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex[:10]}.npy")
+    try:
+        np.save(tmp, arr)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 class _ReusableLeakModel:
@@ -150,6 +182,10 @@ class _ReusableLeakModel:
             self._set_area(node_id, 0.0)
         return pressures, leak, x
 
+    def __deepcopy__(self, memo: dict[int, Any]) -> _ReusableLeakModel:
+        wn = memo.get(id(self.wn), self.wn)
+        return _ReusableLeakModel(wn)
+
 
 class HydraulicEngine:
     """Single-network digital twin. Thread-safe: every solve runs under one lock."""
@@ -160,9 +196,13 @@ class HydraulicEngine:
         meta_path: str = "backend/network_meta.json",
         num_sensors: int = NUM_SENSORS,
         cache_path: str | None = None,
+        state_dir: str | Path | None = None,
+        persist_active_state: bool = False,
     ) -> None:
         self.num_sensors = num_sensors
         self._lock = threading.RLock()
+        self.state_dir: Path | None = Path(state_dir) if state_dir is not None else None
+        self.persist_active_state: bool = bool(persist_active_state and self.state_dir is not None)
         self.is_fallback = not Path(inp_path).exists()
         if self.is_fallback:
             log.warning("!!! %s not found — FALLING BACK to WNTR's bundled Net3 network !!!", inp_path)
@@ -173,7 +213,6 @@ class HydraulicEngine:
             "backend/sensitivity_matrix_net3.npy" if self.is_fallback else "backend/sensitivity_matrix.npy"
         )
         self.cache_path = Path(cache_path or default_cache)
-
         self.wn = wntr.network.WaterNetworkModel(self.inp_path)
         self._apply_invariants(self.wn)
         self.junctions: list[str] = list(self.wn.junction_name_list)
@@ -182,7 +221,25 @@ class HydraulicEngine:
         meta: dict[str, Any] = {}
         if not self.is_fallback and Path(meta_path).exists():
             meta = json.loads(Path(meta_path).read_text())
-        self.network_name: str = meta.get("network_name") or ("net3_fallback" if self.is_fallback else Path(inp_path).stem)
+        self.meta: dict[str, Any] = meta
+
+        if self.is_fallback:
+            self.source_type: str = "net3_fallback"
+        elif "synthetic" in str(self.meta.get("source", "")).lower() or self.meta.get("params", {}).get("source") == "synthetic":
+            self.source_type = "synthetic"
+        else:
+            self.source_type = "osm"
+
+        self.source_filename: Optional[str] = Path(self.inp_path).name if self.inp_path else None
+        self.network_id: str = str(self.meta.get("network_name") or ("net3_fallback" if self.is_fallback else "kengeri_dma"))
+        self.network_name: str = self.network_id
+        self.revision_seq: int = 1
+        self.network_sha256: str = self._fingerprint()[:16]
+        self.network_revision: str = f"rev-{self.revision_seq}-{self.network_sha256[:8]}"
+        self.updated_at_utc: str = datetime.now(timezone.utc).isoformat()
+        self._baseline_snapshot: Optional[dict[str, Any]] = None
+        self._previous_snapshot: Optional[dict[str, Any]] = None
+
         self.households: dict[str, int] = {
             j: int(meta.get("households", {}).get(j, self._derive_households(j))) for j in self.junctions
         }
@@ -204,6 +261,7 @@ class HydraulicEngine:
         self.area_grid = AREA_GRID_FAST_CM2 if self._fast is not None else AREA_GRID_SLOW_CM2
         log.info("leak solver path: %s", self.solver_path)
         self.sensor_ids: list[str] = []
+        self.sensor_idx: dict[str, int] = {}
         self.S: np.ndarray | None = None
         self.ref_leak_demand: np.ndarray | None = None
         self.matrix_ready = False
@@ -211,6 +269,134 @@ class HydraulicEngine:
         self.base_flow_m3h: dict[str, float] = {}
         self.P_base: np.ndarray | None = None
 
+    @property
+    def baseline_pressure(self) -> dict[str, float]:
+        return self.base_pressure
+
+    @baseline_pressure.setter
+    def baseline_pressure(self, val: dict[str, float]) -> None:
+        self.base_pressure = val
+
+    @property
+    def baseline_flow_m3h(self) -> dict[str, float]:
+        return self.base_flow_m3h
+
+    @baseline_flow_m3h.setter
+    def baseline_flow_m3h(self, val: dict[str, float]) -> None:
+        self.base_flow_m3h = val
+
+    @property
+    def base_P(self) -> np.ndarray | None:
+        return self.P_base
+
+    @base_P.setter
+    def base_P(self, val: np.ndarray | None) -> None:
+        self.P_base = val
+
+    @property
+    def ref_leak_m3s(self) -> np.ndarray | None:
+        return self.ref_leak_demand
+
+    @ref_leak_m3s.setter
+    def ref_leak_m3s(self, val: np.ndarray | None) -> None:
+        self.ref_leak_demand = val
+
+    @property
+    def curve_S(self) -> np.ndarray | None:
+        return self.curves
+
+    @curve_S.setter
+    def curve_S(self, val: np.ndarray | None) -> None:
+        self.curves = val
+
+    @property
+    def using_fallback(self) -> bool:
+        return self.is_fallback
+
+    @using_fallback.setter
+    def using_fallback(self, val: bool) -> None:
+        self.is_fallback = val
+
+    @property
+    def latlngs(self) -> dict[str, tuple[float, float]]:
+        return self.latlng
+
+    @property
+    def sha256(self) -> str:
+        return self.network_sha256
+
+    @property
+    def D(self) -> np.ndarray | None:
+        return self.S
+
+    @property
+    def self_ref_leak_m3s(self) -> np.ndarray | None:
+        return self.ref_leak_demand
+
+    def households_for(self, node_id: str) -> int:
+        return int(self.households.get(node_id, self._derive_households(node_id) if node_id in self.junctions else 0))
+
+    def revision_meta_dict(self) -> dict[str, Any]:
+        return self.get_revision_meta()
+
+    def promote_network(
+        self,
+        new_wn: wntr.network.WaterNetworkModel,
+        meta: dict[str, Any] | None = None,
+        source_type: str = "imported_inp",
+        source_filename: str | None = None,
+        network_name: str | None = None,
+        sensor_ids: list[str] | None = None,
+        rebuild_matrix: bool = True,
+    ) -> dict[str, Any]:
+        return self.activate_network(
+            new_wn,
+            meta=meta,
+            source_type=source_type,
+            source_filename=source_filename,
+            network_name=network_name,
+            sensor_ids=sensor_ids,
+        )
+
+    def _fingerprint(self, target_wn: wntr.network.WaterNetworkModel | None = None) -> str:
+        wn = target_wn or self.wn
+        h = hashlib.sha256()
+        for n in sorted(wn.node_name_list):
+            node = wn.get_node(n)
+            coords = getattr(node, "coordinates", (0.0, 0.0))
+            elev = getattr(node, "elevation", getattr(node, "base_head", 0.0))
+            demand = getattr(node, "base_demand", 0.0)
+            h.update(f"{n}:{coords}:{elev}:{demand};".encode())
+        for l in sorted(wn.link_name_list):
+            link = wn.get_link(l)
+            u, v = link.start_node_name, link.end_node_name
+            length = getattr(link, "length", 0.0)
+            diam = getattr(link, "diameter", 0.0)
+            roughness = getattr(link, "roughness", 0.0)
+            status = str(link.initial_status)
+            h.update(f"{l}:{u}->{v}:{length}:{diam}:{roughness}:{status};".encode())
+        return h.hexdigest()
+
+    def get_revision_meta(self) -> dict[str, Any]:
+        return {
+            "network_id": self.network_id,
+            "network_revision": self.network_revision,
+            "source_type": self.source_type,
+            "source_filename": self.source_filename,
+            "sha256": self.network_sha256,
+            "crs": "EPSG:4326",
+            "created_at_utc": self.updated_at_utc,
+            "num_nodes": len(self.wn.node_name_list),
+            "num_pipes": len(self.wn.pipe_name_list),
+            "can_rollback": self._previous_snapshot is not None,
+            "validation_summary": {
+                "junctions": len(self.junctions),
+                "reservoirs": len(self.wn.reservoir_name_list),
+                "sensors": list(self.sensor_ids),
+                "min_baseline_pressure_m": round(float(min(self.baseline_pressure.values())), 2) if self.baseline_pressure else 0.0,
+                "max_baseline_pressure_m": round(float(max(self.baseline_pressure.values())), 2) if self.baseline_pressure else 0.0,
+            },
+        }
     # ─────────────────────────── setup helpers ───────────────────────────
     @staticmethod
     def _apply_invariants(wn: wntr.network.WaterNetworkModel) -> None:
@@ -334,6 +520,7 @@ class HydraulicEngine:
         else:
             raise ValueError(f"unknown sensor strategy {strategy!r}")
         self.sensor_ids = chosen
+        self.sensor_idx = {s: i for i, s in enumerate(chosen)}
         self.min_hop_separation = min_hop_separation
         if self.base_pressure:
             self.P_base = np.array([self.base_pressure[s] for s in chosen])
@@ -344,6 +531,7 @@ class HydraulicEngine:
     def _cache_key(self) -> dict[str, Any]:
         return {
             "inp_sha256": self.inp_sha256,
+            "network_sha256": self.network_sha256,
             "sensor_ids": self.sensor_ids,
             "junctions": self.junctions,
             "ref_leak_cm2": REF_LEAK_CM2,
@@ -367,14 +555,20 @@ class HydraulicEngine:
         g_ref = self.area_grid.index(REF_LEAK_CM2)
         if use_cache and self.cache_path.exists() and sidecar.exists():
             try:
-                side = json.loads(sidecar.read_text())
-                if all(side.get(k) == v for k, v in key.items()):
+                side = json.loads(sidecar.read_text(encoding="utf-8"))
+                # Backward compatibility: existing caches before network_sha256 was added remain valid if inp_sha256 matches
+                expected = dict(key)
+                if "network_sha256" not in side:
+                    expected.pop("network_sha256", None)
+                if all(side.get(k) == v for k, v in expected.items()):
                     curves = np.load(self.cache_path)
                     x = np.load(xcache) if self._fast is not None else None
                     if x is not None and x.shape[-1] != self._fast.x0.shape[0]:
                         raise ValueError("warm-start vectors do not match the hydraulic model")
                     self._set_curves(curves, np.array(side["leak_demand_m3s"]), x, g_ref)
                     log.info("sensitivity matrix loaded from cache %s", self.cache_path)
+                    if self._baseline_snapshot is None:
+                        self._baseline_snapshot = self._take_snapshot()
                     return self.S
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("ignoring bad matrix cache: %s", exc)
@@ -397,14 +591,15 @@ class HydraulicEngine:
         log.info("sensitivity curves %s built in %.1f s", curves.shape, time.perf_counter() - t0)
         if use_cache:
             try:
-                np.save(self.cache_path, curves)
+                _atomic_save_npy(self.cache_path, curves)
                 if x_arr is not None:
-                    np.save(xcache, x_arr)
-                sidecar.write_text(json.dumps({**key, "leak_demand_m3s": leaks.tolist()}))
+                    _atomic_save_npy(xcache, x_arr)
+                _atomic_write_text(sidecar, json.dumps({**key, "leak_demand_m3s": leaks.tolist()}))
             except OSError as exc:
                 log.warning("could not write matrix cache: %s", exc)
+        if self._baseline_snapshot is None:
+            self._baseline_snapshot = self._take_snapshot()
         return self.S
-
     def _set_curves(self, curves: np.ndarray, leaks: np.ndarray, x: np.ndarray | None, g_ref: int) -> None:
         self.curves = curves
         self.curve_x = x
@@ -437,10 +632,12 @@ class HydraulicEngine:
         return best_r, np.clip(best_a, LEAK_AREA_MIN_CM2, LEAK_AREA_MAX_CM2)
 
     def boot(self, strategy: str = "betweenness_separated", use_cache: bool = True) -> "HydraulicEngine":
-        """baseline → sensors → matrix."""
+        """baseline → sensors → matrix (restoring persisted active state if enabled)."""
         self.run_baseline()
         self.select_sentinel_sensors(strategy=strategy)
         self.build_or_load_sensitivity_matrix(use_cache=use_cache)
+        if self.persist_active_state:
+            self._try_restore_persisted_state()
         return self
 
     # ─────────────────────────── detection ───────────────────────────
@@ -553,6 +750,7 @@ class HydraulicEngine:
             **iso,
             "localization_error_m": round(haversine_m(la, lo, ta, to), 2),
             "compute_time_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "network_revision": self.network_revision,
         }
 
     # ─────────────────────────── isolation ───────────────────────────
@@ -569,15 +767,22 @@ class HydraulicEngine:
                 reachable |= nx.node_connected_component(g, s)
         return sorted((j for j in self.junctions if j not in reachable), key=_id_sort_key)
 
-    def isolation_plan(self, node_id: str) -> dict[str, Any]:
+    def isolation_plan(self, node_id: str | None = None, leak_node_id: str | None = None) -> dict[str, Any]:
         """Close every open pipe touching node_id (a valve on every pipe is assumed)."""
-        if node_id not in self.junctions:
-            raise KeyError(node_id)
-        valves = sorted(
-            (d["link"] for _, _, d in self.graph.edges(node_id, data=True)
-             if self.wn.get_link(d["link"]).link_type == "Pipe"),
-            key=_id_sort_key,
-        )
+        target = node_id if node_id is not None else leak_node_id
+        if target is None:
+            raise KeyError("node_id or leak_node_id is required")
+        if target not in self.junctions:
+            raise KeyError(target)
+        valves = sorted({
+            (d.get("link") or d.get("name"))
+            for _, _, d in self.graph.edges(target, data=True)
+            if (
+                d.get("kind") == "pipe"
+                if "kind" in d
+                else self.wn.get_link(d.get("link") or d.get("name")).link_type == "Pipe"
+            )
+        })
         isolated = self._unsupplied_junctions(self._graph_without(set(valves)))
         return {
             "recommended_valves_to_close": valves,
@@ -669,6 +874,8 @@ class HydraulicEngine:
             "sensor_ids": list(self.sensor_ids),
             "nodes": nodes,
             "pipes": pipes,
+            "network_revision": self.network_revision,
+            "revision_meta": self.get_revision_meta(),
         }
 
     def health(self) -> dict[str, Any]:
@@ -679,6 +886,9 @@ class HydraulicEngine:
             "num_pipes": len(self.wn.pipe_name_list),
             "sensor_ids": list(self.sensor_ids),
             "matrix_ready": self.matrix_ready,
+            "network_revision": self.network_revision,
+            "source": self.source_type,
+            "can_rollback": self._previous_snapshot is not None,
         }
 
     def auto_presets(self) -> list[dict[str, Any]]:
@@ -688,6 +898,8 @@ class HydraulicEngine:
             if s in self.graph:
                 src_adj |= set(self.graph.neighbors(s))
         ok = [j for j in self.junctions if j not in sensors and j not in src_adj]
+        if len(ok) < 3:
+            ok = list(self.junctions)
         used: set[str] = set()
 
         def pick(cands: list[str]) -> str:
@@ -695,7 +907,7 @@ class HydraulicEngine:
                 if c not in used:
                     used.add(c)
                     return c
-            c = next(j for j in ok if j not in used)
+            c = next((j for j in ok if j not in used), ok[0] if ok else self.junctions[0])
             used.add(c)
             return c
 
@@ -725,6 +937,267 @@ class HydraulicEngine:
              "target_node_id": crack, "leak_area_cm2": 20.0, "noise_pct": 2.0},
         ]
 
+    def clone_for_scenario(self) -> tuple[wntr.network.WaterNetworkModel, dict[str, Any]]:
+        """Isolated clone of the network model and scenario context."""
+        with self._lock:
+            self.wn.reset_initial_values()
+            wn_copy = copy.deepcopy(self.wn)
+            scenario_context = {
+                "network_revision": self.network_revision,
+                "junctions": list(self.junctions),
+                "sensor_ids": list(self.sensor_ids),
+                "baseline_pressure": dict(self.baseline_pressure),
+                "baseline_flow_m3h": dict(self.baseline_flow_m3h),
+                "households": dict(self.households),
+                "road_class": dict(self.road_class),
+                "latlng": dict(self.latlng),
+            }
+            return wn_copy, scenario_context
+
+    def _take_snapshot(self) -> dict[str, Any]:
+        return {
+            "wn": copy.deepcopy(self.wn),
+            "meta": copy.deepcopy(self.meta),
+            "network_name": self.network_name,
+            "network_id": self.network_id,
+            "source_type": self.source_type,
+            "source_filename": self.source_filename,
+            "network_sha256": self.network_sha256,
+            "revision_seq": self.revision_seq,
+            "network_revision": self.network_revision,
+            "updated_at_utc": self.updated_at_utc,
+            "junctions": list(self.junctions),
+            "sources": list(self.sources),
+            "latlng": copy.deepcopy(self.latlng),
+            "center": self.center,
+            "households": copy.deepcopy(self.households),
+            "road_class": copy.deepcopy(self.road_class),
+            "graph": self.graph.copy() if self.graph is not None else None,
+            "_fast": self._fast,
+            "baseline_pressure": copy.deepcopy(self.base_pressure),
+            "baseline_flow_m3h": copy.deepcopy(self.base_flow_m3h),
+            "base_pressure": copy.deepcopy(self.base_pressure),
+            "base_flow_m3h": copy.deepcopy(self.base_flow_m3h),
+            "base_P": None if self.P_base is None else self.P_base.copy(),
+            "P_base": None if self.P_base is None else self.P_base.copy(),
+            "sensor_ids": list(self.sensor_ids),
+            "sensor_idx": dict(self.sensor_idx),
+            "S": None if self.S is None else self.S.copy(),
+            "ref_leak_m3s": None if self.ref_leak_demand is None else self.ref_leak_demand.copy(),
+            "ref_leak_demand": None if self.ref_leak_demand is None else self.ref_leak_demand.copy(),
+            "curve_S": None if self.curves is None else self.curves.copy(),
+            "curves": None if self.curves is None else self.curves.copy(),
+            "curve_x": None if self.curve_x is None else self.curve_x.copy(),
+            "area_grid": tuple(self.area_grid),
+            "matrix_ready": self.matrix_ready,
+            "solver_path": self.solver_path,
+            "is_fallback": self.is_fallback,
+        }
+
+    def _restore_snapshot(self, snap: dict[str, Any]) -> None:
+        self.wn = copy.deepcopy(snap["wn"])
+        self.meta = copy.deepcopy(snap.get("meta", {}))
+        self.network_name = snap["network_name"]
+        self.network_id = snap.get("network_id", self.network_name)
+        self.source_type = snap["source_type"]
+        self.source_filename = snap["source_filename"]
+        self.network_sha256 = snap["network_sha256"]
+        self.revision_seq = snap["revision_seq"]
+        self.network_revision = snap["network_revision"]
+        self.updated_at_utc = snap["updated_at_utc"]
+        self.junctions = list(snap["junctions"])
+        self.sources = list(snap.get("sources", list(self.wn.reservoir_name_list) + list(self.wn.tank_name_list)))
+        self.latlng = copy.deepcopy(snap["latlng"])
+        self.center = snap["center"]
+        self.households = copy.deepcopy(snap["households"])
+        self.road_class = copy.deepcopy(snap["road_class"])
+        self.graph = snap["graph"].copy() if snap.get("graph") is not None else self._build_graph()
+        if snap.get("_fast") is not None and _ReusableLeakModel.supports(self.wn):
+            self._fast = _ReusableLeakModel(self.wn)
+            self.solver_path = "wntr_reusable_model"
+        else:
+            self._fast = None
+            self.solver_path = "wntr_simulator"
+        self.base_pressure = copy.deepcopy(snap.get("base_pressure", snap.get("baseline_pressure", {})))
+        self.base_flow_m3h = copy.deepcopy(snap.get("base_flow_m3h", snap.get("baseline_flow_m3h", {})))
+        p_base = snap.get("P_base") if snap.get("P_base") is not None else snap.get("base_P")
+        self.P_base = p_base.copy() if p_base is not None else None
+        self.sensor_ids = list(snap["sensor_ids"])
+        self.sensor_idx = dict(snap.get("sensor_idx", {s: i for i, s in enumerate(self.sensor_ids)}))
+        self.S = snap["S"].copy() if snap.get("S") is not None else None
+        ref_leak = snap.get("ref_leak_demand") if snap.get("ref_leak_demand") is not None else snap.get("ref_leak_m3s")
+        self.ref_leak_demand = ref_leak.copy() if ref_leak is not None else None
+        curves = snap.get("curves") if snap.get("curves") is not None else snap.get("curve_S")
+        self.curves = curves.copy() if curves is not None else None
+        self.curve_x = snap["curve_x"].copy() if snap.get("curve_x") is not None else None
+        self.area_grid = tuple(
+            snap.get("area_grid", AREA_GRID_FAST_CM2 if self._fast is not None else AREA_GRID_SLOW_CM2)
+        )
+        self.matrix_ready = snap["matrix_ready"]
+        self.solver_path = snap.get("solver_path", self.solver_path)
+        self.is_fallback = snap.get("is_fallback", False)
+
+    def activate_network(
+        self,
+        new_wn: wntr.network.WaterNetworkModel,
+        meta: dict[str, Any] | None = None,
+        source_type: str = "imported_inp",
+        source_filename: str | None = None,
+        network_name: str | None = None,
+        sensor_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            prev_snap = self._take_snapshot()
+            if self._baseline_snapshot is None:
+                self._baseline_snapshot = prev_snap
+
+            try:
+                self._apply_invariants(new_wn)
+                self.wn = new_wn
+                self.meta = copy.deepcopy(meta) if meta else {}
+                self.source_type = source_type
+                self.source_filename = source_filename
+                self.network_id = network_name or str(self.meta.get("network_name") or "imported_network")
+                self.network_name = self.network_id
+                self.junctions = list(self.wn.junction_name_list)
+                self.sources = list(self.wn.reservoir_name_list) + list(self.wn.tank_name_list)
+                self.latlng = map_network_coordinates(self.wn)
+                c = self.meta.get("center")
+                self.center = (c["lat"], c["lng"]) if c else network_center(self.latlng.values())
+                self.households = {
+                    j: int(self.meta.get("households", {}).get(j, self._derive_households(j)))
+                    for j in self.junctions
+                }
+                self.road_class = {
+                    l: self.meta.get("road_class", {}).get(l) or self._derive_road_class(l)
+                    for l in self.wn.link_name_list
+                }
+                self.graph = self._build_graph()
+                if _ReusableLeakModel.supports(self.wn):
+                    self._fast = _ReusableLeakModel(self.wn)
+                    self.solver_path = "wntr_reusable_model"
+                else:
+                    self._fast = None
+                    self.solver_path = "wntr_simulator"
+                self.area_grid = AREA_GRID_FAST_CM2 if self._fast is not None else AREA_GRID_SLOW_CM2
+                self.run_baseline()
+
+                if sensor_ids and len(sensor_ids) == self.num_sensors and all(s in self.junctions for s in sensor_ids):
+                    self.sensor_ids = list(sensor_ids)
+                    self.sensor_idx = {s: i for i, s in enumerate(self.sensor_ids)}
+                    if self.base_pressure:
+                        self.P_base = np.array([self.base_pressure[s] for s in self.sensor_ids])
+                    self.matrix_ready = False
+                else:
+                    self.select_sentinel_sensors()
+
+                self.build_or_load_sensitivity_matrix(use_cache=False)
+
+                self.revision_seq = prev_snap["revision_seq"] + 1
+                self.network_sha256 = self._fingerprint()[:16]
+                self.network_revision = f"rev-{self.revision_seq}-{self.network_sha256[:8]}"
+                self.updated_at_utc = datetime.now(timezone.utc).isoformat()
+                self._previous_snapshot = prev_snap
+                self._persist_active_state_to_disk()
+            except Exception:
+                self._restore_snapshot(prev_snap)
+                raise
+
+            return self.get_revision_meta()
+
+    def rollback_network(self, target: str = "previous") -> dict[str, Any]:
+        with self._lock:
+            if target == "previous":
+                if self._previous_snapshot is None:
+                    raise ValueError("No previous network revision available for rollback")
+                self._restore_snapshot(self._previous_snapshot)
+                self._previous_snapshot = None
+            elif target == "baseline":
+                if self._baseline_snapshot is None:
+                    raise ValueError("No baseline network revision available for rollback")
+                self._restore_snapshot(copy.deepcopy(self._baseline_snapshot))
+                self._previous_snapshot = None
+            else:
+                raise ValueError(f"Unknown rollback target: {target!r}")
+
+            if self._baseline_snapshot is not None and self.network_revision == self._baseline_snapshot.get("network_revision"):
+                self._clear_persisted_state_on_disk()
+            else:
+                self._persist_active_state_to_disk()
+            return self.get_revision_meta()
+
+    def _persist_active_state_to_disk(self) -> None:
+        """Atomically persist active mutated network state to state_dir when enabled."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            inp_file = self.state_dir / "active_network.inp"
+            state_file = self.state_dir / "active_state.json"
+            tmp_inp = self.state_dir / f".active_network.{uuid.uuid4().hex[:8]}.inp"
+            try:
+                wntr.network.write_inpfile(self.wn, str(tmp_inp))
+                os.replace(tmp_inp, inp_file)
+            finally:
+                if tmp_inp.exists():
+                    tmp_inp.unlink(missing_ok=True)
+
+            state_payload = {
+                "network_id": self.network_id,
+                "network_revision": self.network_revision,
+                "revision_seq": self.revision_seq,
+                "network_sha256": self.network_sha256,
+                "source_type": self.source_type,
+                "source_filename": self.source_filename,
+                "updated_at_utc": self.updated_at_utc,
+                "sensor_ids": list(self.sensor_ids),
+                "meta": self.meta,
+            }
+            _atomic_write_text(state_file, json.dumps(state_payload))
+        except Exception as exc:
+            log.warning("Could not persist active network state to %s: %s", self.state_dir, exc)
+
+    def _clear_persisted_state_on_disk(self) -> None:
+        """Remove persisted active state when rolled back to baseline."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        for fname in ("active_state.json", "active_network.inp"):
+            p = self.state_dir / fname
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def _try_restore_persisted_state(self) -> None:
+        """Restore persisted active network state after restart if present and valid."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        inp_file = self.state_dir / "active_network.inp"
+        state_file = self.state_dir / "active_state.json"
+        if not (inp_file.exists() and state_file.exists()):
+            return
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            restored_wn = wntr.network.WaterNetworkModel(str(inp_file))
+            self.activate_network(
+                restored_wn,
+                meta=state.get("meta") or {},
+                source_type=str(state.get("source_type") or "imported_inp"),
+                source_filename=state.get("source_filename"),
+                network_name=str(state.get("network_id") or "restored_network"),
+                sensor_ids=state.get("sensor_ids"),
+            )
+            if isinstance(state.get("network_sha256"), str) and state["network_sha256"]:
+                self.network_sha256 = str(state["network_sha256"])
+            if isinstance(state.get("revision_seq"), int) and state["revision_seq"] >= 1:
+                self.revision_seq = int(state["revision_seq"])
+            if isinstance(state.get("network_revision"), str) and state["network_revision"]:
+                self.network_revision = str(state["network_revision"])
+            else:
+                self.network_revision = f"rev-{self.revision_seq}-{self.network_sha256[:8]}"
+        except Exception as exc:
+            log.warning("Ignoring corrupt or incompatible persisted network state in %s: %s", self.state_dir, exc)
     def clone_with_sensors(self, strategy: str) -> "HydraulicEngine":
         """Independent engine copy with a different sensor strategy (benchmark use)."""
         other = copy.copy(self)

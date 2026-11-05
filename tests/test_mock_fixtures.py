@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 4.6 seconds
-Output:
 """Offline contract checks for the frontend mock fixtures."""
 
 from __future__ import annotations
