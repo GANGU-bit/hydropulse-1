@@ -26,12 +26,13 @@ import json
 import logging
 import os
 import statistics
+import tempfile
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-
 import networkx as nx
 import numpy as np
 import wntr
@@ -89,6 +90,36 @@ def _net3_path() -> str:
     if not hits:
         raise FileNotFoundError("WNTR's bundled Net3.inp not found")
     return hits[0]
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text atomically via a temporary file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:10]}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+def _atomic_save_npy(path: Path, arr: np.ndarray) -> None:
+    """Save a NumPy array atomically via a temporary .npy file in the same directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex[:10]}.npy")
+    try:
+        np.save(tmp, arr)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 class _ReusableLeakModel:
@@ -165,9 +196,13 @@ class HydraulicEngine:
         meta_path: str = "backend/network_meta.json",
         num_sensors: int = NUM_SENSORS,
         cache_path: str | None = None,
+        state_dir: str | Path | None = None,
+        persist_active_state: bool = False,
     ) -> None:
         self.num_sensors = num_sensors
         self._lock = threading.RLock()
+        self.state_dir: Path | None = Path(state_dir) if state_dir is not None else None
+        self.persist_active_state: bool = bool(persist_active_state and self.state_dir is not None)
         self.is_fallback = not Path(inp_path).exists()
         if self.is_fallback:
             log.warning("!!! %s not found — FALLING BACK to WNTR's bundled Net3 network !!!", inp_path)
@@ -178,7 +213,6 @@ class HydraulicEngine:
             "backend/sensitivity_matrix_net3.npy" if self.is_fallback else "backend/sensitivity_matrix.npy"
         )
         self.cache_path = Path(cache_path or default_cache)
-
         self.wn = wntr.network.WaterNetworkModel(self.inp_path)
         self._apply_invariants(self.wn)
         self.junctions: list[str] = list(self.wn.junction_name_list)
@@ -497,6 +531,7 @@ class HydraulicEngine:
     def _cache_key(self) -> dict[str, Any]:
         return {
             "inp_sha256": self.inp_sha256,
+            "network_sha256": self.network_sha256,
             "sensor_ids": self.sensor_ids,
             "junctions": self.junctions,
             "ref_leak_cm2": REF_LEAK_CM2,
@@ -520,8 +555,12 @@ class HydraulicEngine:
         g_ref = self.area_grid.index(REF_LEAK_CM2)
         if use_cache and self.cache_path.exists() and sidecar.exists():
             try:
-                side = json.loads(sidecar.read_text())
-                if all(side.get(k) == v for k, v in key.items()):
+                side = json.loads(sidecar.read_text(encoding="utf-8"))
+                # Backward compatibility: existing caches before network_sha256 was added remain valid if inp_sha256 matches
+                expected = dict(key)
+                if "network_sha256" not in side:
+                    expected.pop("network_sha256", None)
+                if all(side.get(k) == v for k, v in expected.items()):
                     curves = np.load(self.cache_path)
                     x = np.load(xcache) if self._fast is not None else None
                     if x is not None and x.shape[-1] != self._fast.x0.shape[0]:
@@ -552,10 +591,10 @@ class HydraulicEngine:
         log.info("sensitivity curves %s built in %.1f s", curves.shape, time.perf_counter() - t0)
         if use_cache:
             try:
-                np.save(self.cache_path, curves)
+                _atomic_save_npy(self.cache_path, curves)
                 if x_arr is not None:
-                    np.save(xcache, x_arr)
-                sidecar.write_text(json.dumps({**key, "leak_demand_m3s": leaks.tolist()}))
+                    _atomic_save_npy(xcache, x_arr)
+                _atomic_write_text(sidecar, json.dumps({**key, "leak_demand_m3s": leaks.tolist()}))
             except OSError as exc:
                 log.warning("could not write matrix cache: %s", exc)
         if self._baseline_snapshot is None:
@@ -593,10 +632,12 @@ class HydraulicEngine:
         return best_r, np.clip(best_a, LEAK_AREA_MIN_CM2, LEAK_AREA_MAX_CM2)
 
     def boot(self, strategy: str = "betweenness_separated", use_cache: bool = True) -> "HydraulicEngine":
-        """baseline → sensors → matrix."""
+        """baseline → sensors → matrix (restoring persisted active state if enabled)."""
         self.run_baseline()
         self.select_sentinel_sensors(strategy=strategy)
         self.build_or_load_sensitivity_matrix(use_cache=use_cache)
+        if self.persist_active_state:
+            self._try_restore_persisted_state()
         return self
 
     # ─────────────────────────── detection ───────────────────────────
@@ -1057,6 +1098,7 @@ class HydraulicEngine:
                 self.network_revision = f"rev-{self.revision_seq}-{self.network_sha256[:8]}"
                 self.updated_at_utc = datetime.now(timezone.utc).isoformat()
                 self._previous_snapshot = prev_snap
+                self._persist_active_state_to_disk()
             except Exception:
                 self._restore_snapshot(prev_snap)
                 raise
@@ -1078,8 +1120,84 @@ class HydraulicEngine:
             else:
                 raise ValueError(f"Unknown rollback target: {target!r}")
 
+            if self._baseline_snapshot is not None and self.network_revision == self._baseline_snapshot.get("network_revision"):
+                self._clear_persisted_state_on_disk()
+            else:
+                self._persist_active_state_to_disk()
             return self.get_revision_meta()
 
+    def _persist_active_state_to_disk(self) -> None:
+        """Atomically persist active mutated network state to state_dir when enabled."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            inp_file = self.state_dir / "active_network.inp"
+            state_file = self.state_dir / "active_state.json"
+            tmp_inp = self.state_dir / f".active_network.{uuid.uuid4().hex[:8]}.inp"
+            try:
+                wntr.network.write_inpfile(self.wn, str(tmp_inp))
+                os.replace(tmp_inp, inp_file)
+            finally:
+                if tmp_inp.exists():
+                    tmp_inp.unlink(missing_ok=True)
+
+            state_payload = {
+                "network_id": self.network_id,
+                "network_revision": self.network_revision,
+                "revision_seq": self.revision_seq,
+                "network_sha256": self.network_sha256,
+                "source_type": self.source_type,
+                "source_filename": self.source_filename,
+                "updated_at_utc": self.updated_at_utc,
+                "sensor_ids": list(self.sensor_ids),
+                "meta": self.meta,
+            }
+            _atomic_write_text(state_file, json.dumps(state_payload))
+        except Exception as exc:
+            log.warning("Could not persist active network state to %s: %s", self.state_dir, exc)
+
+    def _clear_persisted_state_on_disk(self) -> None:
+        """Remove persisted active state when rolled back to baseline."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        for fname in ("active_state.json", "active_network.inp"):
+            p = self.state_dir / fname
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def _try_restore_persisted_state(self) -> None:
+        """Restore persisted active network state after restart if present and valid."""
+        if not self.persist_active_state or self.state_dir is None:
+            return
+        inp_file = self.state_dir / "active_network.inp"
+        state_file = self.state_dir / "active_state.json"
+        if not (inp_file.exists() and state_file.exists()):
+            return
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            restored_wn = wntr.network.WaterNetworkModel(str(inp_file))
+            self.activate_network(
+                restored_wn,
+                meta=state.get("meta") or {},
+                source_type=str(state.get("source_type") or "imported_inp"),
+                source_filename=state.get("source_filename"),
+                network_name=str(state.get("network_id") or "restored_network"),
+                sensor_ids=state.get("sensor_ids"),
+            )
+            if isinstance(state.get("network_sha256"), str) and state["network_sha256"]:
+                self.network_sha256 = str(state["network_sha256"])
+            if isinstance(state.get("revision_seq"), int) and state["revision_seq"] >= 1:
+                self.revision_seq = int(state["revision_seq"])
+            if isinstance(state.get("network_revision"), str) and state["network_revision"]:
+                self.network_revision = str(state["network_revision"])
+            else:
+                self.network_revision = f"rev-{self.revision_seq}-{self.network_sha256[:8]}"
+        except Exception as exc:
+            log.warning("Ignoring corrupt or incompatible persisted network state in %s: %s", self.state_dir, exc)
     def clone_with_sensors(self, strategy: str) -> "HydraulicEngine":
         """Independent engine copy with a different sensor strategy (benchmark use)."""
         other = copy.copy(self)

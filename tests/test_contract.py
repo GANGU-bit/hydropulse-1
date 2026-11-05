@@ -352,8 +352,9 @@ def test_v1_1_iot_and_pipe_condition_contracts():
         assert pkt.source_type == "simulator"
 
     # 2. Telemetry Ingest with deduplication and validation
+    unique_src = f"sensor_contract_{int(time.time() * 1000)}"
     valid_pkt = {
-        "source_id": "sensor_contract_test",
+        "source_id": unique_src,
         "source_type": "simulator",
         "network_revision": iot_model.network_revision,
         "observed_at_utc": "2026-11-05T12:00:00Z",

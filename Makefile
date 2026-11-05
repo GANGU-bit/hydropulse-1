@@ -21,8 +21,7 @@ network-synthetic:
 	$(PYTHON) backend/generate_bangalore_dma.py --source synthetic
 
 backend:
-	$(UVICORN) backend.main:app --host 0.0.0.0 --port 8000 --reload
-
+	@bash scripts/run_backend.sh || powershell -ExecutionPolicy Bypass -File scripts/run_backend.ps1
 frontend:
 	cd frontend && npm run dev -- --host
 

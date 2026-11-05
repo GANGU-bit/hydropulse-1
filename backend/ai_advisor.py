@@ -20,7 +20,9 @@ import networkx as nx
 import numpy as np
 from fastapi import HTTPException
 import wntr
-
+from pathlib import Path
+from backend.hydraulic_engine import _atomic_save_npy
+from backend.openrouter_client import get_openrouter_client
 from data_utils.geo_mapper import haversine_m
 from data_utils.schemas import (
     AiSuggestion,
@@ -83,6 +85,14 @@ class AiAdvisorService:
         sensor_sugs, sensor_benchmark = self._evaluate_sensor_placement(engine)
         suggestions.extend(sensor_sugs)
 
+        # Optional server-side OpenRouter narrative enrichment (strictly bounded, deterministic fallback)
+        try:
+            or_client = get_openrouter_client()
+            if or_client.is_active:
+                suggestions = or_client.enrich_suggestions(suggestions, network_revision=rev)
+        except Exception as exc:
+            log.warning("Optional OpenRouter enrichment skipped: %s", type(exc).__name__)
+
         compute_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         resp = AiSuggestionsResponse(
             network_revision=rev,
@@ -95,7 +105,6 @@ class AiAdvisorService:
             self._suggestions_cache[rev] = resp
 
         return resp
-
     # ─────────────────────────── Category A: Loop Completion ───────────────────────────
     def _evaluate_loop_completion(self, engine: Any) -> List[AiSuggestion]:
         """Find vulnerable dead-end pairs and evaluate loop pipe additions under steady state and outage."""
@@ -401,10 +410,9 @@ class AiAdvisorService:
                         mat[:, junctions.index(s_id)] = s_mat[:, k]
 
         try:
-            np.save(cache_disk, mat)
+            _atomic_save_npy(Path(cache_disk), mat)
         except Exception:
             pass
-
         self._matrix_cache[rev] = mat
         return mat
 

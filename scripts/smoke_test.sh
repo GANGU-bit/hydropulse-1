@@ -13,25 +13,26 @@ if ! command -v curl &>/dev/null; then
 fi
 
 # 1. Health check
-echo -n "[1/6] Testing GET /api/health ... "
+echo -n "[1/11] Testing GET /api/health ... "
 HEALTH_RES=$(curl -s -f "$BASE/api/health")
 echo "$HEALTH_RES" | python -m json.tool > /dev/null
 STATUS=$(echo "$HEALTH_RES" | python -c "import sys, json; print(json.load(sys.stdin).get('status', ''))")
+REV=$(echo "$HEALTH_RES" | python -c "import sys, json; print(json.load(sys.stdin).get('network_revision', ''))")
 if [ "$STATUS" != "ok" ]; then
     echo "FAILED (status is not ok)"
     exit 1
 fi
-echo "PASSED"
+echo "PASSED (rev=$REV)"
 
 # 2. Network check
-echo -n "[2/6] Testing GET /api/network ... "
+echo -n "[2/11] Testing GET /api/network ... "
 NET_RES=$(curl -s -f "$BASE/api/network")
 echo "$NET_RES" | python -m json.tool > /dev/null
 NET_STATS=$(echo "$NET_RES" | python -c "import sys, json; d=json.load(sys.stdin); print(f'name={d.get(\"network_name\")} nodes={len(d.get(\"nodes\",[]))} pipes={len(d.get(\"pipes\",[]))} sensors={len(d.get(\"sensor_ids\",[]))}')")
 echo "PASSED ($NET_STATS)"
 
 # 3. Presets check
-echo -n "[3/6] Testing GET /api/presets ... "
+echo -n "[3/11] Testing GET /api/presets ... "
 PRESETS_RES=$(curl -s -f "$BASE/api/presets")
 echo "$PRESETS_RES" | python -m json.tool > /dev/null
 PRESET_COUNT=$(echo "$PRESETS_RES" | python -c "import sys, json; print(len(json.load(sys.stdin).get('presets', [])))")
@@ -42,7 +43,7 @@ fi
 echo "PASSED ($PRESET_COUNT presets)"
 
 # 4. Simulate leak for each preset
-echo "[4/6] Testing POST /api/simulate-leak for presets:"
+echo "[4/11] Testing POST /api/simulate-leak for presets:"
 python -c "
 import sys, json, urllib.request
 
@@ -69,7 +70,7 @@ for p in presets_data.get('presets', []):
 "
 
 # 5. Bad node id -> expect 404
-echo -n "[5/6] Testing POST /api/simulate-leak with invalid node (expect 404) ... "
+echo -n "[5/11] Testing POST /api/simulate-leak with invalid node (expect 404) ... "
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/simulate-leak" \
     -H "Content-Type: application/json" \
     -d '{"target_node_id":"NONEXISTENT_NODE_999","leak_area_cm2":25.0,"noise_pct":1.5}')
@@ -81,7 +82,7 @@ else
 fi
 
 # 6. Invalid area -> expect 422
-echo -n "[6/6] Testing POST /api/simulate-leak with leak_area_cm2=500 (expect 422) ... "
+echo -n "[6/11] Testing POST /api/simulate-leak with leak_area_cm2=500 (expect 422) ... "
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/simulate-leak" \
     -H "Content-Type: application/json" \
     -d '{"target_node_id":"J1","leak_area_cm2":500.0,"noise_pct":1.5}')
@@ -92,7 +93,51 @@ else
     exit 1
 fi
 
+# 7. What-If simulation (v1.1)
+echo -n "[7/11] Testing POST /api/what-if (v1.1 scenario sandbox) ... "
+WHATIF_RES=$(curl -s -f -X POST "$BASE/api/what-if" \
+    -H "Content-Type: application/json" \
+    -d '{"scenario_name":"Smoke What-If","demand_multiplier":1.15,"reservoir_head_delta_m":2.0}')
+WHATIF_REV=$(echo "$WHATIF_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert 'scenario' in d and 'baseline' in d; print(d.get('network_revision',''))")
+echo "PASSED (rev=$WHATIF_REV)"
+
+# 8. Network presets & IntelliSense (v1.1)
+echo -n "[8/11] Testing GET /api/network/presets & POST /api/network/intellisense ... "
+NPRESETS_RES=$(curl -s -f "$BASE/api/network/presets")
+echo "$NPRESETS_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert len(d.get('presets',[])) >= 3"
+ISENSE_RES=$(curl -s -f -X POST "$BASE/api/network/intellisense" \
+    -H "Content-Type: application/json" \
+    -d '{"from_node_id":"J1","new_junction_lat":12.9082,"new_junction_lng":77.4853}')
+ISENSE_DIAM=$(echo "$ISENSE_RES" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get('recommended_diameter_mm',0))")
+echo "PASSED (recommended_diameter=${ISENSE_DIAM}mm)"
+
+# 9. IoT state & Pipe Condition / RUL transparency (v1.1)
+echo -n "[9/11] Testing GET /api/iot/state & GET /api/pipes/condition ... "
+IOT_RES=$(curl -s -f "$BASE/api/iot/state?demo_tick=true&seed=42")
+echo "$IOT_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert len(d.get('latest_readings',{})) >= 5"
+PIPE_RES=$(curl -s -f "$BASE/api/pipes/condition")
+PIPE_COUNT=$(echo "$PIPE_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert d.get('rul_available') is False; print(len(d.get('pipes',[])))")
+echo "PASSED (pipes=$PIPE_COUNT, rul_honest=true)"
+
+# 10. Auto-Valve safety gate (v1.1)
+echo -n "[10/11] Testing POST /api/iot/auto-valve safety gate ... "
+AV_RES=$(curl -s -f -X POST "$BASE/api/iot/auto-valve" \
+    -H "Content-Type: application/json" \
+    -d '{"action":"confirm_close","confirm":false}')
+AV_STATUS=$(echo "$AV_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert d.get('status') == 'refused'; print(d.get('status',''))")
+if [ "$AV_STATUS" = "refused" ]; then
+    echo "PASSED (unconfirmed close refused safely)"
+else
+    echo "FAILED (expected 422, got $AV_CODE)"
+    exit 1
+fi
+
+# 11. AI Advisor suggestions (v1.1)
+echo -n "[11/11] Testing GET /api/ai/suggestions ... "
+AI_RES=$(curl -s -f "$BASE/api/ai/suggestions")
+AI_COUNT=$(echo "$AI_RES" | python -c "import sys, json; d=json.load(sys.stdin); print(len(d.get('suggestions',[])))")
+echo "PASSED ($AI_COUNT suggestions)"
+
 echo "=================================================="
 echo "    ALL SMOKE TESTS PASSED SUCCESSFULLY!          "
 echo "=================================================="
-
