@@ -66,7 +66,7 @@ validate_base_configuration() {
 [[ -r /etc/os-release ]] || fail "cannot identify the host operating system"
 # shellcheck disable=SC1091
 . /etc/os-release
-[[ "${ID:-}" == "ubuntu" && "${VERSION_ID:-}" == "24.04" ]] || fail "this deployment requires Ubuntu 24.04"
+[[ "${ID:-}" == "ubuntu" && ( "${VERSION_ID:-}" == "22.04" || "${VERSION_ID:-}" == "24.04" ) ]] || fail "this deployment requires Ubuntu 22.04 or 24.04"
 
 command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 command -v python3.11 >/dev/null 2>&1 || fail "python3.11 is required; install it before deployment"

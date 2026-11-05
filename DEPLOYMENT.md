@@ -8,7 +8,7 @@ This document covers production deployment on AWS EC2 (Ubuntu 24.04 LTS x86_64, 
 
 ### EC2 Instance Requirements
 
-- **OS**: Ubuntu 24.04 LTS x86_64
+- **OS**: Ubuntu 24.04 LTS or 22.04 LTS x86_64
 - **Python**: 3.11 (system package or pyenv)
 - **Network**: Public IP with security group allowing inbound SSH (port 22) and optional temporary tunneling
 - **Storage**: At least 10 GB GP3 for repository, venv, sensitivity matrix caches, and persisted state
