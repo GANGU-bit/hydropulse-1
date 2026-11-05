@@ -5,8 +5,9 @@ import {
   Clock3,
   CircleHelp,
   Calculator,
+  GitBranch,
 } from 'lucide-react';
-export default function Header({ mode, health, onHelp, onRoi }) {
+export default function Header({ mode, health, onHelp, onRoi, onStudio }) {
   return (
     <header className='topbar'>
       <div className='brand'>
@@ -56,6 +57,14 @@ export default function Header({ mode, health, onHelp, onRoi }) {
           <Clock3 size={13} />
           <LiveClock />
         </div>
+        <button
+          className='icon-btn'
+          aria-label='Open Network Studio'
+          title='Network Studio'
+          onClick={onStudio}
+        >
+          <GitBranch size={16} />
+        </button>
         <button
           className='icon-btn'
           aria-label='Open ROI calculator'
