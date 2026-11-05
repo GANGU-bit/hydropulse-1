@@ -36,7 +36,7 @@ env_value() {
 }
 
 validate_base_configuration() {
-    local environment host port reload cors cache_dir state_dir admin_auth
+    local environment host port reload cors cache_dir state_dir admin_auth admin_token
 
     environment="$(env_value HYDROPULSE_ENV)"
     host="$(env_value HYDROPULSE_HOST)"
@@ -46,6 +46,7 @@ validate_base_configuration() {
     cache_dir="$(env_value HYDROPULSE_CACHE_DIR)"
     state_dir="$(env_value HYDROPULSE_STATE_DIR)"
     admin_auth="$(env_value HYDROPULSE_REQUIRE_ADMIN_AUTH)"
+    admin_token="$(env_value HYDROPULSE_ADMIN_TOKEN)"
 
     [[ "${environment}" == "prod" ]] || fail "${ENV_FILE} must set HYDROPULSE_ENV=prod"
     [[ "${host}" == "127.0.0.1" ]] || fail "${ENV_FILE} must set HYDROPULSE_HOST=127.0.0.1"
@@ -56,6 +57,7 @@ validate_base_configuration() {
     [[ "${cache_dir}" == "${STATE_DIR}" ]] || fail "${ENV_FILE} must set HYDROPULSE_CACHE_DIR=${STATE_DIR}"
     [[ "${state_dir}" == "${STATE_DIR}" ]] || fail "${ENV_FILE} must set HYDROPULSE_STATE_DIR=${STATE_DIR}"
     [[ "${admin_auth,,}" == "true" || "${admin_auth}" == "1" ]] || fail "${ENV_FILE} must enable HYDROPULSE_REQUIRE_ADMIN_AUTH"
+    [[ ${#admin_token} -ge 8 && "${admin_token}" != *"REPLACE"* && "${admin_token}" != *"replace"* ]] || fail "${ENV_FILE} must contain an HYDROPULSE_ADMIN_TOKEN of at least 8 characters (not a placeholder)"
 }
 
 # System and prerequisite checks
@@ -90,8 +92,7 @@ install -d -o root -g root -m 0755 "${ENV_DIR}"
 # Create env file from template on first run (idempotent)
 if [[ ! -e "${ENV_FILE}" ]]; then
     install -o root -g root -m 0600 "${ENV_TEMPLATE}" "${ENV_FILE}"
-    printf '%s\n' "created ${ENV_FILE} from template; add required secrets and rerun"
-    exit 0
+    fail "created ${ENV_FILE} from template; set HYDROPULSE_CORS_ORIGINS and HYDROPULSE_ADMIN_TOKEN to real values and rerun"
 fi
 
 # Ensure env file is properly owned and secured (idempotent)

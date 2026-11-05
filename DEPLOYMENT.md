@@ -85,7 +85,7 @@ HYDROPULSE_CORS_ORIGINS=https://frontend.example.invalid
 
 # Admin authentication for mutating endpoints
 HYDROPULSE_REQUIRE_ADMIN_AUTH=true
-HYDROPULSE_ADMIN_TOKEN=<generate-strong-random-token-at-least-16-chars>
+HYDROPULSE_ADMIN_TOKEN=<generate-strong-random-token-at-least-8-chars>
 
 # Persistence directories (durable storage in /var/lib/hydropulse)
 HYDROPULSE_STATE_DIR=/var/lib/hydropulse
@@ -385,7 +385,7 @@ For a complete environment variable reference, see `.env.example` in the reposit
 | `HYDROPULSE_RELOAD` | `false` | Auto-reload forbidden |
 | `HYDROPULSE_CORS_ORIGINS` | **exact frontend origin** | No wildcard in prod |
 | `HYDROPULSE_REQUIRE_ADMIN_AUTH` | `true` | Admin token required |
-| `HYDROPULSE_ADMIN_TOKEN` | **secret** | >= 16 characters |
+| `HYDROPULSE_ADMIN_TOKEN` | **secret** | >= 8 characters |
 | `HYDROPULSE_PERSIST_ACTIVE_STATE` | `true` | Persist across restarts |
 | `HYDROPULSE_STATE_DIR` | `/var/lib/hydropulse` | Durable state |
 | `HYDROPULSE_CACHE_DIR` | `/var/lib/hydropulse` | Sensitivity matrix |
