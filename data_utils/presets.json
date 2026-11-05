@@ -1,0 +1,31 @@
+Exit code: 0
+Wall time: 3.2 seconds
+Output:
+{
+  "presets": [
+    {
+      "id": "kengeri_mainline_rupture",
+      "label": "Kengeri Mainline Rupture",
+      "description": "45 cm2 rupture on main trunk corridor at J1",
+      "target_node_id": "J1",
+      "leak_area_cm2": 45.0,
+      "noise_pct": 1.5
+    },
+    {
+      "id": "residential_lane_seep",
+      "label": "Residential Lane Seep",
+      "description": "8 cm2 seep in residential dead-end lane at J124",
+      "target_node_id": "J124",
+      "leak_area_cm2": 8.0,
+      "noise_pct": 3.0
+    },
+    {
+      "id": "joint_crack_junction",
+      "label": "Joint Crack under Junction",
+      "description": "20 cm2 cracked joint at secondary intersection at J68",
+      "target_node_id": "J68",
+      "leak_area_cm2": 20.0,
+      "noise_pct": 2.0
+    }
+  ]
+}

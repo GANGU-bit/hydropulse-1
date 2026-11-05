@@ -1,0 +1,17 @@
+Exit code: 0
+Wall time: 4.6 seconds
+Output:
+{
+  "status": "ok",
+  "network_name": "kengeri_synthetic",
+  "num_junctions": 129,
+  "num_pipes": 203,
+  "sensor_ids": [
+    "J72",
+    "J29",
+    "J64",
+    "J95",
+    "J47"
+  ],
+  "matrix_ready": true
+}
