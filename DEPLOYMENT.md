@@ -125,7 +125,7 @@ The service unit configures:
 - **User**: `hydropulse` (non-root system user)
 - **WorkingDirectory**: `/opt/hydropulse`
 - **EnvironmentFile**: `/etc/hydropulse/hydropulse.env`
-- **ExecStart**: Uvicorn with `--workers 1 --host 127.0.0.1 --port 8000 --no-access-log`
+- **ExecStart**: python -m uvicorn with `--workers 1 --host 127.0.0.1 --port 8000 --no-access-log`
 - **Restart**: `on-failure` with 5-second delay
 - **RestartSec**: 5 seconds
 - **StandardOutput/StandardError**: journal
