@@ -58,6 +58,11 @@ PRESSURE_EXPONENT = 0.5
 LPCD = 135.0
 PERSONS_PER_HOUSEHOLD = 4.5
 TANKER_LITRES = 6000.0
+# Leak-size grid for the fingerprint curves (cm²). REF_LEAK_CM2 must be in both.
+# The fast solver path can afford the full grid at boot; the WNTRSimulator path
+# (Net3 fallback) uses two points to keep boot time bounded.
+AREA_GRID_FAST_CM2 = (5.0, 12.5, 25.0, 50.0, 100.0)
+AREA_GRID_SLOW_CM2 = (25.0, 100.0)
 DEFAULT_CENTER = (12.9081, 77.4852)
 
 
@@ -126,17 +131,24 @@ class _ReusableLeakModel:
         self.wn.get_node(node_id)._leak_area = area_m2
         _wntr_param.leak_area_param.build(self.m, self.wn, self.updater, index_over=[node_id])
 
-    def solve(self, node_id: str, area_m2: float) -> tuple[dict[str, float], float]:
-        """Returns ({junction: pressure m}, leak m³/s). Always restores area 0."""
-        self.m.load_var_values_from_x(self.x0)
+    def solve(
+        self, node_id: str, area_m2: float, x_init: np.ndarray | None = None
+    ) -> tuple[dict[str, float], float, np.ndarray]:
+        """Returns ({junction: pressure m}, leak m³/s, solution vector). Always restores area 0.
+
+        x_init (a previous solution of a nearby leak) is only a Newton starting
+        point; it changes iteration count, not the converged answer.
+        """
+        self.m.load_var_values_from_x(self.x0 if x_init is None else x_init)
         self._set_area(node_id, area_m2)
         try:
             self._newton()
             pressures = {j: self.m.head[j].value - self.elev[j] for j in self.junctions}
             leak = float(self.m.leak_rate[node_id].value)
+            x = self.m.get_x().copy()
         finally:
             self._set_area(node_id, 0.0)
-        return pressures, leak
+        return pressures, leak, x
 
 
 class HydraulicEngine:
@@ -182,11 +194,14 @@ class HydraulicEngine:
         self.center = (c["lat"], c["lng"]) if c else network_center(self.latlng.values())
 
         self.graph = self._build_graph()
+        self.curves: np.ndarray | None = None
+        self.curve_x: np.ndarray | None = None
         self._fast: _ReusableLeakModel | None = None
         self.solver_path = "wntr_simulator"
         if _ReusableLeakModel.supports(self.wn):
             self._fast = _ReusableLeakModel(self.wn)
             self.solver_path = "wntr_reusable_model"
+        self.area_grid = AREA_GRID_FAST_CM2 if self._fast is not None else AREA_GRID_SLOW_CM2
         log.info("leak solver path: %s", self.solver_path)
         self.sensor_ids: list[str] = []
         self.S: np.ndarray | None = None
@@ -239,13 +254,22 @@ class HydraulicEngine:
         """One steady-state WNTRSimulator run on the current model state."""
         return wntr.sim.WNTRSimulator(self.wn).run_sim()
 
-    def _solve_with_leak(self, node_id: str, area_cm2: float) -> tuple[np.ndarray, float]:
+    def _solve_with_leak(
+        self, node_id: str, area_cm2: float, x_init: np.ndarray | None = None
+    ) -> tuple[np.ndarray, float]:
         """Inject a leak, solve, ALWAYS restore. Returns (sensor pressures m, leak m³/s)."""
+        p, leak, _ = self._solve_with_leak_x(node_id, area_cm2, x_init)
+        return p, leak
+
+    def _solve_with_leak_x(
+        self, node_id: str, area_cm2: float, x_init: np.ndarray | None = None
+    ) -> tuple[np.ndarray, float, np.ndarray | None]:
         if self._fast is not None:
             with self._lock:
-                p_all, leak = self._fast.solve(node_id, cm2_to_m2(area_cm2))
-            return np.array([p_all[s] for s in self.sensor_ids], dtype=float), leak
-        return self._solve_with_leak_wntr(node_id, area_cm2)
+                p_all, leak, x = self._fast.solve(node_id, cm2_to_m2(area_cm2), x_init)
+            return np.array([p_all[s] for s in self.sensor_ids], dtype=float), leak, x
+        p, leak = self._solve_with_leak_wntr(node_id, area_cm2)
+        return p, leak, None
 
     def _solve_with_leak_wntr(self, node_id: str, area_cm2: float) -> tuple[np.ndarray, float]:
         """Reference path: add_leak → WNTRSimulator → remove_leak + reset."""
@@ -317,42 +341,91 @@ class HydraulicEngine:
             "sensor_ids": self.sensor_ids,
             "junctions": self.junctions,
             "ref_leak_cm2": REF_LEAK_CM2,
+            "area_grid_cm2": list(self.area_grid),
         }
 
     def build_or_load_sensitivity_matrix(self, use_cache: bool = True) -> np.ndarray:
-        """S[j] = P_base − P_leak(j) at the 5 sensors for a 25 cm² leak at junction j."""
+        """Fingerprint curves C[j, g] = P_base − P_leak(j, area_g) at the 5 sensors.
+
+        S = C[:, ref] is the classic N×5 sensitivity matrix for the 25 cm² reference
+        leak (used for the cosine heatmap). The full curve over the area grid lets
+        screening account for how the drop *shape* changes with leak size.
+        Cache: .npy (curves) + .json sidecar (+ _x.npy warm starts on the fast path).
+        """
         if self.P_base is None:
             self.run_baseline()
         sidecar = self.cache_path.with_suffix(".json")
+        xcache = self.cache_path.with_name(self.cache_path.stem + "_x.npy")
         key = self._cache_key()
+        g_ref = self.area_grid.index(REF_LEAK_CM2)
         if use_cache and self.cache_path.exists() and sidecar.exists():
             try:
                 side = json.loads(sidecar.read_text())
                 if all(side.get(k) == v for k, v in key.items()):
-                    self.S = np.load(self.cache_path)
-                    self.ref_leak_demand = np.array(side["ref_leak_demand_m3s"])
-                    self.matrix_ready = True
+                    curves = np.load(self.cache_path)
+                    x = np.load(xcache) if self._fast is not None else None
+                    self._set_curves(curves, np.array(side["leak_demand_m3s"]), x, g_ref)
                     log.info("sensitivity matrix loaded from cache %s", self.cache_path)
                     return self.S
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("ignoring bad matrix cache: %s", exc)
         t0 = time.perf_counter()
-        rows, leaks = [], []
-        for j in self.junctions:
-            p, leak = self._solve_with_leak(j, REF_LEAK_CM2)
-            rows.append(self.P_base - p)
-            leaks.append(leak)
-        self.S = np.vstack(rows)
-        self.ref_leak_demand = np.array(leaks)
-        self.matrix_ready = True
-        log.info("sensitivity matrix %s built in %.1f s", self.S.shape, time.perf_counter() - t0)
+        n, ng = len(self.junctions), len(self.area_grid)
+        curves = np.zeros((n, ng, len(self.sensor_ids)))
+        leaks = np.zeros((n, ng))
+        xs: list[list[np.ndarray]] = []
+        for i, j in enumerate(self.junctions):
+            row_x, x_prev = [], None
+            for g, area in enumerate(self.area_grid):
+                p, leak, x = self._solve_with_leak_x(j, area, x_prev)
+                curves[i, g] = self.P_base - p
+                leaks[i, g] = leak
+                row_x.append(x)
+                x_prev = x
+            xs.append(row_x)
+        x_arr = np.array(xs) if self._fast is not None else None
+        self._set_curves(curves, leaks, x_arr, g_ref)
+        log.info("sensitivity curves %s built in %.1f s", curves.shape, time.perf_counter() - t0)
         if use_cache:
             try:
-                np.save(self.cache_path, self.S)
-                sidecar.write_text(json.dumps({**key, "ref_leak_demand_m3s": leaks}))
+                np.save(self.cache_path, curves)
+                if x_arr is not None:
+                    np.save(xcache, x_arr)
+                sidecar.write_text(json.dumps({**key, "leak_demand_m3s": leaks.tolist()}))
             except OSError as exc:
                 log.warning("could not write matrix cache: %s", exc)
         return self.S
+
+    def _set_curves(self, curves: np.ndarray, leaks: np.ndarray, x: np.ndarray | None, g_ref: int) -> None:
+        self.curves = curves
+        self.curve_x = x
+        self.S = curves[:, g_ref, :]
+        self.ref_leak_demand = leaks[:, g_ref]
+        self.matrix_ready = True
+
+    def _fit_curves(self, dp_obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Closest point to dp_obs on every junction's piecewise-linear size curve.
+
+        The curve runs origin (no leak) → grid points; the last segment is
+        extended to the 100 cm² cap. Returns (residual m, estimated area cm²) per junction.
+        """
+        n = self.curves.shape[0]
+        pts = np.concatenate([np.zeros((n, 1, self.curves.shape[2])), self.curves], axis=1)
+        areas = np.concatenate([[0.0], np.array(self.area_grid)])
+        best_r = np.full(n, np.inf)
+        best_a = np.full(n, REF_LEAK_CM2)
+        for g in range(len(areas) - 1):
+            a, b = pts[:, g, :], pts[:, g + 1, :]
+            d = b - a
+            dd = np.einsum("ij,ij->i", d, d)
+            t = np.divide(np.einsum("ij,ij->i", dp_obs - a, d), dd, out=np.zeros(n), where=dd > 0)
+            hi = (LEAK_AREA_MAX_CM2 - areas[g]) / (areas[g + 1] - areas[g]) if g == len(areas) - 2 else 1.0
+            t = np.clip(t, 0.0, hi)
+            r = np.linalg.norm(dp_obs - (a + t[:, None] * d), axis=1)
+            area = areas[g] + t * (areas[g + 1] - areas[g])
+            better = r < best_r
+            best_r[better], best_a[better] = r[better], area[better]
+        return best_r, np.clip(best_a, LEAK_AREA_MIN_CM2, LEAK_AREA_MAX_CM2)
 
     def boot(self, strategy: str = "betweenness_separated", use_cache: bool = True) -> "HydraulicEngine":
         """baseline → sensors → matrix."""
@@ -399,20 +472,41 @@ class HydraulicEngine:
         heat = np.clip(cos, 0.0, 1.0) ** HEATMAP_EXPONENT
         if heat.max() > 0:
             heat = heat / heat.max()
-        order = np.argsort(-cos, kind="stable")[:TOP_K_CANDIDATES]
+        # Candidate screening: size-aware fit against each junction's fingerprint
+        # curve (cosine against a single 25 cm² row misranks other leak sizes).
+        fit_r, fit_area = self._fit_curves(dp_obs)
+        order = np.lexsort((-cos, fit_r))[:TOP_K_CANDIDATES]
 
         # e. stage 2: verify each candidate at its estimated size, re-rank by residual
         verified = []
         for idx in order:
             j = self.junctions[int(idx)]
-            s_j = self.S[idx]
-            ss = float(s_j @ s_j)
-            alpha = float(dp_obs @ s_j) / ss if ss > 0 else 0.0
-            est_area = min(max(REF_LEAK_CM2 * alpha, LEAK_AREA_MIN_CM2), LEAK_AREA_MAX_CM2)
-            p_sim, leak_sim = self._solve_with_leak(j, est_area)
+            est_area = float(fit_area[idx])
+            x_init = None
+            if self.curve_x is not None:
+                g_near = int(np.argmin(np.abs(np.array(self.area_grid) - est_area)))
+                x_init = self.curve_x[idx, g_near]
+            p_sim, leak_sim = self._solve_with_leak(j, est_area, x_init)
             dp_sim = self.P_base - p_sim
-            resid = float(np.linalg.norm(dp_obs - dp_sim))
-            verified.append((resid, j, est_area, leak_sim * 60000.0, _cosine(dp_obs, dp_sim)))
+            best = (float(np.linalg.norm(dp_obs - dp_sim)), j, est_area, leak_sim * 60000.0,
+                    _cosine(dp_obs, dp_sim))
+            # One secant step on the leak size: match the drop magnitude along dp_obs,
+            # using the nearest exact grid fingerprint as the second point.
+            if obs_norm > 0:
+                u = dp_obs / obs_norm
+                grid = np.array(self.area_grid)
+                g2 = int(np.argmin(np.where(np.abs(grid - est_area) > 1e-6, np.abs(grid - est_area), np.inf)))
+                f1, f2 = float(dp_sim @ u), float(self.curves[idx, g2] @ u)
+                if abs(f1 - f2) > 1e-9:
+                    a2 = est_area + (obs_norm - f1) * (est_area - grid[g2]) / (f1 - f2)
+                    a2 = float(min(max(a2, LEAK_AREA_MIN_CM2), LEAK_AREA_MAX_CM2))
+                    if abs(a2 - est_area) > 1e-3:
+                        p2, leak2 = self._solve_with_leak(j, a2, x_init)
+                        dp2 = self.P_base - p2
+                        r2 = float(np.linalg.norm(dp_obs - dp2))
+                        if r2 < best[0]:
+                            best = (r2, j, a2, leak2 * 60000.0, _cosine(dp_obs, dp2))
+            verified.append(best)
         verified.sort(key=lambda v: (v[0], v[1]))
         candidates = [
             {
