@@ -251,8 +251,14 @@ class HydraulicEngine:
 
     # ─────────────────────────── solving ───────────────────────────
     def _solve(self):
-        """One steady-state WNTRSimulator run on the current model state."""
-        return wntr.sim.WNTRSimulator(self.wn).run_sim()
+        """One steady-state WNTRSimulator run on the current model state.
+
+        Raises instead of returning unconverged numbers (WNTR only warns by default).
+        """
+        res = wntr.sim.WNTRSimulator(self.wn).run_sim(convergence_error=True)
+        if res.error_code is not None:
+            raise RuntimeError(f"WNTRSimulator failed (error_code={res.error_code})")
+        return res
 
     def _solve_with_leak(
         self, node_id: str, area_cm2: float, x_init: np.ndarray | None = None
@@ -342,6 +348,7 @@ class HydraulicEngine:
             "junctions": self.junctions,
             "ref_leak_cm2": REF_LEAK_CM2,
             "area_grid_cm2": list(self.area_grid),
+            "wntr_version": wntr.__version__,  # warm-start vector layout is WNTR-internal
         }
 
     def build_or_load_sensitivity_matrix(self, use_cache: bool = True) -> np.ndarray:
@@ -364,6 +371,8 @@ class HydraulicEngine:
                 if all(side.get(k) == v for k, v in key.items()):
                     curves = np.load(self.cache_path)
                     x = np.load(xcache) if self._fast is not None else None
+                    if x is not None and x.shape[-1] != self._fast.x0.shape[0]:
+                        raise ValueError("warm-start vectors do not match the hydraulic model")
                     self._set_curves(curves, np.array(side["leak_demand_m3s"]), x, g_ref)
                     log.info("sensitivity matrix loaded from cache %s", self.cache_path)
                     return self.S
@@ -547,6 +556,12 @@ class HydraulicEngine:
         }
 
     # ─────────────────────────── isolation ───────────────────────────
+    def _graph_without(self, link_ids: set[str]) -> nx.Graph:
+        """Copy of the open-link graph with the given links removed (valves closed)."""
+        g = self.graph.copy()
+        g.remove_edges_from([(u, v) for u, v, d in self.graph.edges(data=True) if d["link"] in link_ids])
+        return g
+
     def _unsupplied_junctions(self, g: nx.Graph) -> list[str]:
         reachable: set[str] = set()
         for s in self.sources:
@@ -563,9 +578,7 @@ class HydraulicEngine:
              if self.wn.get_link(d["link"]).link_type == "Pipe"),
             key=_id_sort_key,
         )
-        g = self.graph.copy()
-        g.remove_edges_from([(u, v) for u, v, d in self.graph.edges(node_id, data=True) if d["link"] in valves])
-        isolated = self._unsupplied_junctions(g)
+        isolated = self._unsupplied_junctions(self._graph_without(set(valves)))
         return {
             "recommended_valves_to_close": valves,
             "isolated_node_ids": isolated,
@@ -578,9 +591,7 @@ class HydraulicEngine:
         for v in valve_ids:
             if v not in self.wn.link_name_list:
                 raise LookupError(v)
-        g = self.graph.copy()
-        g.remove_edges_from([(u, w) for u, w, d in self.graph.edges(data=True) if d["link"] in set(valve_ids)])
-        cut_off = set(self._unsupplied_junctions(g))
+        cut_off = set(self._unsupplied_junctions(self._graph_without(set(valve_ids))))
         with self._lock:
             saved = {v: self.wn.get_link(v).initial_status for v in valve_ids}
             node = self.wn.get_node(target_node_id)
