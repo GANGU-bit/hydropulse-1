@@ -1,0 +1,141 @@
+# =============================================================================
+# HydroPulse — advisory AI PR review via Google Jules
+# =============================================================================
+# Third-party action : thalesraymond/jules-pr-reviewer ("Advanced Jules PR Reviewer")
+# Verified release   : v1.9.0  (published 2026-10-29)
+# Pinned commit SHA  : 53f8cf09e8e6ceecffe5d57cccc1a1f4964a28de
+# Upstream           : https://github.com/thalesraymond/jules-pr-reviewer
+# Verified against   : action.yml + dist/index.js at that exact SHA.
+#
+# Pinned by full commit SHA on purpose: tags are mutable and this is an external
+# dependency that runs with a write-scoped token.
+#
+# NON-NEGOTIABLE POLICY: this review is ADVISORY.
+#   * fail_on: never        -> a block/comment verdict still produces a GREEN check.
+#   * block_on is NOT set   -> it would override fail_on and gate merges.
+#   * jules/review must NOT be added to branch protection or a repository ruleset.
+#   A broken Jules integration may show a red check run, but that check is
+#   optional, so it can never prevent a human-approved merge.
+#
+# NOTE: Google announced Jules becomes read-only after 2026-11-11 and winds down
+# on 2026-12-31. This file (plus .github/jules-review-rules.md) is the entire
+# vendor surface, so the reviewer can be swapped without touching other CI.
+# =============================================================================
+
+name: Jules PR Review (advisory)
+
+on:
+  # Never use pull_request_target: it runs with base-repo write tokens and hands
+  # attacker-controlled diffs to the model. The action itself also hard-refuses it.
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+
+# Least privilege. No contents:write, no actions:write, no administration:write.
+# Jules can read the repo and write review artefacts. It cannot push or merge.
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+# One review in flight per PR. A newer push cancels the in-flight run, so an
+# older commit's verdict can never become authoritative for a newer commit and
+# two runs can never race on the same check-run name.
+concurrency:
+  group: jules-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Jules review
+    runs-on: ubuntu-latest
+    # Backstop above the action's own worst case:
+    #   2 x timeout_minutes (single timeout retry) = 50 min
+    # + 1 min debounce + ~3 min preflight/submission/finalisation = ~54 min.
+    # 65 min leaves ~11 min of headroom before the runner kills the job.
+    timeout-minutes: 65
+
+    # guards:
+    #  1. JULES_REVIEW_ENABLED unset or any value except exactly "false" -> enabled.
+    #  2. head repo == base repo -> same-repository branches only, never forks.
+    #  3. not a draft -> drafts are skipped before any API call is made.
+    if: >-
+      vars.JULES_REVIEW_ENABLED != 'false' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false
+
+    steps:
+      # --- Guard: missing/empty secret fails fast with a clear error ---------
+      # The action would otherwise burn a session attempt on an empty key.
+      # Exiting here creates NO check run, so nothing is left pending.
+      - name: Preflight — verify Jules configuration
+        env:
+          JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
+        run: |
+          set -uo pipefail
+          if [ -z "${JULES_API_KEY:-}" ]; then
+            echo "::error title=Jules API key is missing::Repository secret JULES_API_KEY is not set (or is empty). Add it under Settings > Secrets and variables > Actions. This review is ADVISORY - the failure does not block merging."
+            exit 1
+          fi
+          echo "JULES_API_KEY is present (value is never printed)."
+
+      # --- Debounce: coalesce bursts of autonomous-agent pushes --------------
+      # Only on synchronize. A push arriving during the sleep starts a new run,
+      # which cancels this one via the concurrency group above. The sleep runs
+      # BEFORE the action, so it never eats into the action's internal timeout.
+      - name: Debounce rapid pushes
+        if: github.event.action == 'synchronize'
+        run: |
+          set -uo pipefail
+          echo "Coalescing rapid pushes for PR #${{ github.event.pull_request.number }} (60s)..."
+          sleep 60
+
+      # --- The review --------------------------------------------------------
+      - name: Run Jules review
+        uses: thalesraymond/jules-pr-reviewer@53f8cf09e8e6ceecffe5d57cccc1a1f4964a28de # v1.9.0
+        with:
+          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+          # Advisory mode. Do NOT change to blocking/any and do NOT add block_on.
+          fail_on: never
+
+          # Report High + Warning only; Info-level noise is filtered out.
+          min_severity_to_report: warning
+
+          # balanced review; "quiet" misses real bugs, "assertive" hunts style.
+          strictness: chill
+
+          # Skip before any API call: no session, no check run, nothing pending.
+          skip_drafts: 'true'
+          skip_forks: 'true'
+
+          # Do not re-report findings that are still open on later pushes.
+          dedupe: 'true'
+
+          # Never let the model propose one-click patches or approve the PR.
+          enable_suggestions: 'false'
+          enable_approve: 'false'
+
+          # 25 min per attempt. Upstream guidance: real reviews take 15-25 min
+          # and "do not set below 20"; agentic mode inspects the whole repo, so
+          # the floor is too tight and a timeout would burn 2 quota sessions.
+          # One automatic retry is allowed, and ONLY on timeout -> 50 min worst
+          # case, bounded by the 65 min job timeout above.
+          timeout_minutes: '25'
+
+          # Loaded from the BASE sha, so a PR cannot weaken its own review rules.
+          rules_file: .github/jules-review-rules.md
+
+          # Full-repo context, no 80k-char diff ceiling. Falls back to prompt
+          # mode automatically if the agentic session cannot start or times out.
+          diff_mode: agentic
+
+          # Oversized PRs: review the highest-churn files and report what was
+          # skipped, instead of silently truncating the diff.
+          large_pr_strategy: prioritize
+
+          # Build output, caches, virtualenvs, minified bundles, binary assets.
+          # Deliberately NOT excluded: source, schemas, tests, requirements.txt,
+          # package.json, package-lock.json, frontend/public/mock/**.
+          ignored_paths: '["node_modules/**","dist/**","build/**","coverage/**","htmlcov/**",".venv/**","venv/**","__pycache__/**","*.pyc",".pytest_cache/**",".mypy_cache/**",".ruff_cache/**",".next/**",".vite/**","*.min.js","*.min.css","*.map","*.png","*.jpg","*.jpeg","*.gif","*.webp","*.ico","*.pdf","*.zip","*.gz","*.whl","*.so","*.dylib","*.dll","*.exe","*.onnx","*.pkl","*.h5","*.npy","*.npz"]'
