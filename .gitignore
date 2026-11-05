@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+dist/
+.env
+.DS_Store
+backend/sensitivity_matrix.npy
+backend/sensitivity_matrix.json
