@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 4.5 seconds
-Output:
 """Unit tests for Gangu-owned data utility modules."""
 
 from __future__ import annotations

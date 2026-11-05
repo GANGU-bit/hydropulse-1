@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.7 seconds
-Output:
 # HydroPulse ðŸ’§âš¡
 
 **Software-Only Municipal Hydraulic Digital Twin for Pipe Burst Triangulation**

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.5 seconds
-Output:
 #!/usr/bin/env bash
 set -e
 

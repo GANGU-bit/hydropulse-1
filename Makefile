@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 4.3 seconds
-Output:
 .PHONY: setup network network-synthetic backend frontend test benchmark smoke fixtures snapshot presets clean
 
 VENV ?= .venv

@@ -1,5 +1,5 @@
 # HydroPulse: SOURCE OF TRUTH
-Version: 1.0.1 · Contract owner: Hardhik · Last updated: backend MVP · Status: FROZEN after CP2 (H13)
+Version: 1.1.0 · Contract owner: Hardhik · Last updated: v1.1 Part 2 Additive Contract · Status: FROZEN for v1.0, EXTENDED for v1.1
 
 > This file is the single source of truth for every human and AI agent working on HydroPulse.
 > If code, a prompt, a plan, a chat message or an agent's assumption disagrees with this file, THIS FILE WINS
@@ -216,6 +216,81 @@ Implementations of this contract, all of which must agree with it:
   frontend/src/api/client.js (consumer) · frontend/public/mock/*.json (fixtures) · tests/test_contract.py (enforcer)
 
 ---------------------------------------------------------------------------------------------------
+## 7.1 Additive API Contract v1.1 (Part 2)
+General: All v1.0 endpoints, fields, types, units, and semantics are 100% preserved. All v1.1 additions
+to existing v1.0 response schemas (`HealthResponse`, `NetworkResponse`, `LeakSimulationResponse`) are
+OPTIONAL with default values so existing v1.0 clients and tests pass unchanged. New Part 2 capabilities
+are exposed via additive endpoints and schemas.
+
+### Revision Token and Concurrency Rules
+1. **Immutable Network Revisions**: Every network state is identified by an immutable revision token,
+   e.g. `rev-1-<sha8>`. Any committed mutation (import, builder commit, AI suggestion apply, reset)
+   generates a new revision token sequentially.
+2. **Optimistic Concurrency**: Mutation and scenario endpoints accept `expected_network_revision`. If
+   specified and the active revision does not match, the operation is rejected (409 Conflict) to avoid
+   stale overwrites.
+3. **Rollback & Isolated Context**: The backend maintains revision history allowing single-step or baseline
+   rollback (`can_rollback: bool`). What-If simulations run in an isolated ephemeral context and NEVER
+   mutate the active baseline revision.
+4. **NetworkRevisionMeta**: Carries logical network ID, revision token, source type (`synthetic`, `osm`,
+   `imported_inp`, `imported_geojson`, `ward_preset`, `net3_fallback`), SHA256 checksum, CRS (`EPSG:4326`),
+   UTC creation timestamp, node and pipe counts, rollback capability, and validation summary.
+
+### Extended v1.0 Response Fields
+- `GET /api/health` → `HealthResponse`: adds `network_revision?: string = None`, `source?: string = None`, `can_rollback: bool = False`.
+- `GET /api/network` → `NetworkResponse`: adds `network_revision?: string = None`, `revision_meta?: NetworkRevisionMeta = None`.
+- `POST /api/simulate-leak` → `LeakSimulationResponse`: adds `network_revision?: string = None`.
+
+### Additive Endpoints & Workflows
+
+#### 1. What-If Scenario Analysis
+- `POST /api/what-if`
+  - Request: `WhatIfRequest` (pipe overrides up to 25 items, demand multiplier 0.5..2.0, reservoir head delta ±20m, leak injections up to 5 items, seed ≥ 0, expected network revision).
+  - Response: `WhatIfResponse` (network revision, converged flag, solver message, baseline vs scenario `WhatIfMetrics`, node pressure deltas, pipe warnings, compute time, physical limitations).
+  - Invariant: Ephemeral execution. Does NOT bump or mutate the active network revision.
+
+#### 2. AI Engineering Advisor
+- `GET /api/advisor/suggestions`
+  - Response: `AiSuggestionsResponse` (active network revision, deterministic recommendations for loop completion, pipe upsizing, and sensor placement, sensor benchmark metrics, compute time).
+- `POST /api/advisor/apply`
+  - Request: `ApplySuggestionRequest` (suggestion ID, expected network revision, `confirm: bool`).
+  - Response: `ApplySuggestionResponse` (applied flag, previous and new network revision tokens, mutation summary, before/after metrics).
+
+#### 3. Network Importer, Presets & Builder
+- `GET /api/network/presets`
+  - Response: `NetworkPresetsListResponse` (active revision, catalogue of available presets: synthetic, OSM, Net3, ward presets).
+- `POST /api/network/import/preview`
+  - Request: `NetworkImportPreviewRequest` (format: "inp" | "geojson", filename max 128 chars, raw content max 2MB, optional network name).
+  - Response: `NetworkImportPreviewResponse` (valid flag, preview token, source revision, proposed `NetworkRevisionMeta`, warnings, errors).
+- `POST /api/network/import/commit`
+  - Request: `NetworkImportCommitRequest` (preview token, expected network revision, `confirm: bool = True`).
+  - Response: `NetworkRevisionCommitResponse` (committed flag, previous and new revision, `NetworkRevisionMeta`, message).
+- `POST /api/network/reset`
+  - Request: `NetworkResetRequest` (target: "previous" | "baseline", `confirm: bool = True`).
+  - Response: `NetworkRevisionCommitResponse` (restores previous snapshot or initial baseline).
+- `POST /api/builder/intellisense`
+  - Request: `IntelliSenseRequest` (from node, optional to node or target lat/lng, target velocity 0.6..1.5 m/s, roughness, expected revision).
+  - Response: `IntelliSenseResponse` (segment length, elevations, slope, downstream demand, recommended diameter, Hazen-Williams velocity & headloss, loop candidates, warnings).
+- `POST /api/builder/preview`
+  - Request: `NetworkBuildPreviewRequest` (new nodes max 20, new pipes max 20, expected revision).
+  - Response: `NetworkBuildPreviewResponse` (preview token, before/after `WhatIfMetrics`, warnings, errors).
+- `POST /api/builder/commit`
+  - Request: `NetworkBuildCommitRequest` (preview token, expected network revision, `confirm: bool = True`).
+  - Response: `NetworkRevisionCommitResponse`.
+
+#### 4. Simulated IoT Telemetry, Pipe Condition & Auto-Valve
+- `POST /api/iot/ingest`
+  - Request: `TelemetryIngestRequest` (1..50 `TelemetryPacket` items: pressure, flow, demand).
+  - Response: `TelemetryIngestResponse` (accepted, rejected, deduplicated counts, active network revision).
+- `GET /api/iot/state`
+  - Response: `IoTStateResponse` (stream status, ring buffer size, latest readings map, valve status, pending proposal).
+- `GET /api/pipes/condition`
+  - Response: `PipeConditionResponse` (physical velocity, unit headloss, hoop stress, Joukowsky surge potential, RUL status and provenance note).
+- `POST /api/valves/auto`
+  - Request: `AutoValveRequest` (actions: set_mode, propose, confirm_close, emergency_stop, reset_valves; leak parameters, proposal ID, confirmation).
+  - Response: `AutoValveResponse` (active valve closures, two-phase proposal payload, safety emergency stop status).
+
+---------------------------------------------------------------------------------------------------
 ## 8. Mock fixtures (frontend/public/mock/)
 | Endpoint                    | Fixture file                                            |
 |-----------------------------|---------------------------------------------------------|
@@ -322,3 +397,4 @@ post "NETWORK REGENERATED" in chat.
 |---------|------|---------|---------------------------------|
 | 1.0.0   | H0   | Hardhik | Initial frozen contract and rules |
 | 1.0.1   | backend MVP | Hardhik | Non-breaking. §1: candidate screening is a size-aware fingerprint fit (cosine-only screening scored 27.5% top-1 at 0% noise in the benchmark); no API field changed. `seed` must be ≥ 0 (negative seeds were a 500, now a 422) |
+| 1.1.0   | Part 2 Wave 1 | Gangu / Hardhik | Additive API Contract v1.1: versioned network state (NetworkRevisionMeta), revision token in v1.0 responses, What-If analysis, AI Advisor, Network Importer/Builder/IntelliSense, IoT telemetry, pipe condition, and auto-valve endpoints. 100% backward compatible with v1.0. |

@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 3.2 seconds
-Output:
 """
 Demo Insurance: Snapshot live API responses into frontend/public/mock/
 Allows frontend to replay 100% REAL physics results offline if backend fails on stage.

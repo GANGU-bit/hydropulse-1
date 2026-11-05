@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 2.9 seconds
-Output:
 # HydroPulse: Demo-Day Run of Show & Stage Playbook
 
 **Event:** Lakshya 2026 @ SJBIT, Bengaluru Â· **Track 02:** Smart and Sustainable Future

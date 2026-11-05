@@ -1,6 +1,3 @@
-Exit code: 0
-Wall time: 2.7 seconds
-Output:
 """
 Build realistic demo presets from a committed EPANET network model (.inp).
 Selects:
