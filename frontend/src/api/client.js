@@ -28,7 +28,10 @@ async function request(path, options = {}) {
 const mock = async (file) => {
   const res = await fetch(`/mock/${file}`);
   if (!res.ok) throw new Error(`Missing mock data: ${file}`);
-  return res.json();
+  const text = await res.text();
+  const jsonStart = text.indexOf('{');
+  const payload = jsonStart !== -1 ? text.slice(jsonStart) : text;
+  return JSON.parse(payload);
 };
 export const client = {
   forcedMock: forced,

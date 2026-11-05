@@ -106,6 +106,7 @@ export default function App() {
       else if (k === 'r') reset();
       else if (k === 'j') setJudge((v) => !v);
       else if (k === 'v' && judge) setRevealed((v) => !v);
+      else if (k === 'n') setStudioOpen(true);
       else if (k === 'b') document.querySelector('.map-toggle')?.click();
       else if (k === 'f') {
         if (!document.fullscreenElement)
@@ -256,6 +257,7 @@ export default function App() {
                 ['R', 'Reset incident'],
                 ['J', 'Toggle judge mode'],
                 ['V', 'Reveal truth'],
+                ['N', 'Network Studio'],
                 ['B', 'Toggle basemap'],
                 ['F', 'Fullscreen'],
                 ['?', 'Show shortcuts'],
