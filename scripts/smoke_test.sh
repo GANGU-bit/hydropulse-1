@@ -2,6 +2,11 @@
 set -e
 
 BASE="${BASE:-http://localhost:8000}"
+ADMIN_TOKEN="${ADMIN_TOKEN:-}"
+AUTH_HEADER=()
+if [ -n "$ADMIN_TOKEN" ]; then
+    AUTH_HEADER=(-H "X-Admin-Token: $ADMIN_TOKEN")
+fi
 echo "=================================================="
 echo "    HydroPulse API Smoke Test (Target: $BASE)    "
 echo "=================================================="
@@ -113,7 +118,7 @@ echo "PASSED (recommended_diameter=${ISENSE_DIAM}mm)"
 
 # 9. IoT state & Pipe Condition / RUL transparency (v1.1)
 echo -n "[9/11] Testing GET /api/iot/state & GET /api/pipes/condition ... "
-IOT_RES=$(curl -s -f "$BASE/api/iot/state?demo_tick=true&seed=42")
+IOT_RES=$(curl -s -f ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} "$BASE/api/iot/state?demo_tick=true&seed=42")
 echo "$IOT_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert len(d.get('latest_readings',{})) >= 5"
 PIPE_RES=$(curl -s -f "$BASE/api/pipes/condition")
 PIPE_COUNT=$(echo "$PIPE_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert d.get('rul_available') is False; print(len(d.get('pipes',[])))")
@@ -122,6 +127,7 @@ echo "PASSED (pipes=$PIPE_COUNT, rul_honest=true)"
 # 10. Auto-Valve safety gate (v1.1)
 echo -n "[10/11] Testing POST /api/iot/auto-valve safety gate ... "
 AV_RES=$(curl -s -f -X POST "$BASE/api/iot/auto-valve" \
+    ${AUTH_HEADER[@]+"${AUTH_HEADER[@]}"} \
     -H "Content-Type: application/json" \
     -d '{"action":"confirm_close","confirm":false}')
 AV_STATUS=$(echo "$AV_RES" | python -c "import sys, json; d=json.load(sys.stdin); assert d.get('status') == 'refused'; print(d.get('status',''))")

@@ -17,3 +17,5 @@ backend/sensitivity_matrix*.npy
 backend/sensitivity_matrix*.json
 backend/.state/
 frontend/public/mock/backups/
+.vercel
+.env*

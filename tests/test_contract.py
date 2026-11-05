@@ -30,6 +30,8 @@ from data_utils.schemas import (
     lpm_to_tankers_per_day,
 )
 BASE_URL = os.environ.get("BASE", "http://localhost:8000").rstrip("/")
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+ADMIN_HEADERS = {"X-Admin-Token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
 
 
 def check_api_reachable() -> bool:
@@ -373,6 +375,7 @@ def test_v1_1_iot_and_pipe_condition_contracts():
     r_ingest = requests.post(
         f"{BASE_URL}/api/iot/ingest",
         json={"packets": [valid_pkt, dup_pkt, bad_tgt_pkt, bad_unit_pkt, stale_rev_pkt]},
+        headers=ADMIN_HEADERS,
         timeout=2.0,
     )
     assert r_ingest.status_code == 200
@@ -397,36 +400,36 @@ def test_v1_1_iot_and_pipe_condition_contracts():
     # 4. Safe Auto-Valve State Machine
     rev = iot_model.network_revision
     # Refused by default
-    r_refused = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "confirm": True}, timeout=2.0)
+    r_refused = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "confirm": True}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_refused.status_code == 200
     assert r_refused.json()["status"] == "refused"
 
     # Enable mode
-    r_enable = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "set_mode", "enable_auto_valve": True}, timeout=2.0)
+    r_enable = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "set_mode", "enable_auto_valve": True}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_enable.status_code == 200
     assert r_enable.json()["auto_valve_enabled"] is True
 
     # Propose
-    r_prop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "propose", "target_node_id": "J15", "leak_area_cm2": 25.0}, timeout=2.0)
+    r_prop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "propose", "target_node_id": "J15", "leak_area_cm2": 25.0}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_prop.status_code == 200
     prop_data = r_prop.json()
     assert prop_data["status"] == "proposed"
     proposal_id = prop_data["proposal"]["proposal_id"]
 
     # Confirm close
-    r_conf = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "proposal_id": proposal_id, "confirm": True}, timeout=2.0)
+    r_conf = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "confirm_close", "proposal_id": proposal_id, "confirm": True}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_conf.status_code == 200
     assert r_conf.json()["status"] == "closed_in_simulation"
     assert r_conf.json()["simulation_only"] is True
 
     # Emergency stop
-    r_estop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "emergency_stop"}, timeout=2.0)
+    r_estop = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "emergency_stop"}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_estop.status_code == 200
     assert r_estop.json()["status"] == "stopped"
     assert r_estop.json()["emergency_stop"] is True
 
     # Reset valves
-    r_reset = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "reset_valves"}, timeout=2.0)
+    r_reset = requests.post(f"{BASE_URL}/api/iot/auto-valve", json={"action": "reset_valves"}, headers=ADMIN_HEADERS, timeout=2.0)
     assert r_reset.status_code == 200
     assert r_reset.json()["status"] == "reset"
     assert r_reset.json()["active_valve_closures"] == []

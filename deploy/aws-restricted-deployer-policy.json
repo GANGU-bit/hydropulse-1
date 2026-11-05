@@ -1,0 +1,71 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowEC2ReadOps",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceStatus",
+        "ec2:DescribeSecurityGroups",
+        "ec2:DescribeSubnets",
+        "ec2:DescribeVpcs",
+        "ec2:DescribeKeyPairs",
+        "ec2:DescribeImages",
+        "ec2:DescribeTags"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AllowInstanceLifecycleInApSouth1",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:RebootInstances"
+      ],
+      "Resource": "arn:aws:ec2:ap-south-1:697731339705:instance/*"
+    },
+    {
+      "Sid": "AllowEC2InstanceConnectUbuntuInApSouth1",
+      "Effect": "Allow",
+      "Action": [
+        "ec2-instance-connect:SendSSHPublicKey"
+      ],
+      "Resource": "arn:aws:ec2:ap-south-1:697731339705:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ec2:osuser": "ubuntu"
+        }
+      }
+    },
+    {
+      "Sid": "AllowCloudWatchMetricsRead",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyHighRiskAndBillingActions",
+      "Effect": "Deny",
+      "Action": [
+        "account:*",
+        "aws-portal:*",
+        "billing:*",
+        "ce:*",
+        "cur:*",
+        "organizations:*",
+        "iam:Create*",
+        "iam:Delete*",
+        "iam:Put*",
+        "iam:Attach*",
+        "iam:Update*"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
