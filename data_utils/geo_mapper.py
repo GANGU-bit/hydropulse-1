@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 3.5 seconds
+Wall time: 4.4 seconds
 Output:
 """
 Geographic coordinate mapping and spatial utilities for HydroPulse.
@@ -8,7 +8,7 @@ real Bengaluru / Kengeri coordinates.
 """
 
 import math
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, Iterable
 
 KENGERI_BBOX = dict(
     lat_min=12.9000,
@@ -201,15 +201,18 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return round(R * c, 2)
 
 
-def network_center(latlngs: Dict[str, Tuple[float, float]]) -> Tuple[float, float]:
+def network_center(
+    latlngs: Dict[str, Tuple[float, float]] | Iterable[Tuple[float, float]],
+) -> Tuple[float, float]:
     """
     Compute centroid (lat, lng) for a dict of node_id -> (lat, lng).
     """
-    if not latlngs:
+    points = list(latlngs.values()) if hasattr(latlngs, "values") else list(latlngs)
+    if not points:
         return (12.9081, 77.4852)
 
-    lats = [pt[0] for pt in latlngs.values()]
-    lngs = [pt[1] for pt in latlngs.values()]
+    lats = [pt[0] for pt in points]
+    lngs = [pt[1] for pt in points]
     return (round(sum(lats) / len(lats), 6), round(sum(lngs) / len(lngs), 6))
 
 
