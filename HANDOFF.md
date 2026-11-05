@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 3.3 seconds
+Wall time: 9.2 seconds
 Output:
 # HydroPulse: Team Handoff Log
 
@@ -19,4 +19,5 @@ Append-only log for team communications across phases.
 [H01:30] FROM gangu TO badri: Phase A mock fixtures generated in frontend/public/mock/ (network.json, presets.json, health.json, 4 simulate_leak_*.json). All validate against schemas.py. ACTION: Badri unblocked to build UI on mock data.
 [H02:00] FROM gangu TO hardhik: `make presets`, live contract tests, smoke tests, and real fixture snapshots are blocked until `backend/bangalore_kengeri.inp`, `backend/network_meta.json`, and the live API are committed/available. ACTION: provide the frozen network artifacts and notify Gangu when `/api/health` is reachable.
 [H13:30] FROM gangu TO hardhik: live `tests/test_contract.py` against the backend PR fails one frozen invariant: `recommended_valves_to_close` is `['P2', 'P18', 'P19']`, but contract requires sorted order (`['P18', 'P19', 'P2']`). ACTION: sort valve IDs in backend response, then rerun contract tests.
+[H14:20] FROM gangu TO hardhik/badri: v1.1 Part 1 preflight found `main` at `ab0568b`; negative-seed and Net3 fallback regressions are fixed in follow-up PR #6. The requested additive v1.1 schema/API changes require Hardhik approval under SOT Â§11 before implementation. Current `main` has no frontend source or package-lock, so the mandated `npm ci && npm run build` cannot run; Badri must provide the frontend baseline before UI work.
 

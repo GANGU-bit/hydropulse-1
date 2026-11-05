@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 2.7 seconds
+Wall time: 4.1 seconds
 Output:
 """
 Pydantic v2 schemas for HydroPulse.
@@ -196,7 +196,9 @@ class LeakSimulationRequest(BaseModel):
     target_node_id: str = Field(..., min_length=1, description="Junction ID to inject leak into")
     leak_area_cm2: float = Field(25.0, ge=0.5, le=100.0, description="Leak orifice area in cm2")
     noise_pct: float = Field(1.5, ge=0.0, le=10.0, description="Gaussian noise level added to sensors (0..10%)")
-    seed: Optional[int] = Field(None, description="Optional RNG seed for deterministic noise")
+    seed: Optional[int] = Field(
+        None, ge=0, description="Optional non-negative RNG seed for deterministic noise"
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

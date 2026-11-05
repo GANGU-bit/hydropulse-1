@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 4.5 seconds
+Wall time: 3.9 seconds
 Output:
 """
 API Contract tests for HydroPulse live backend.
@@ -194,4 +194,12 @@ def test_simulate_leak_validation_errors():
         timeout=2.0,
     )
     assert r_422_neg.status_code == 422
+
+    # NumPy rejects negative RNG seeds; the API must validate them as 422, not leak a 500.
+    r_422_seed = requests.post(
+        f"{BASE_URL}/api/simulate-leak",
+        json={"target_node_id": "J1", "seed": -1},
+        timeout=2.0,
+    )
+    assert r_422_seed.status_code == 422
 
