@@ -1,11 +1,20 @@
+Exit code: 0
+Wall time: 2.5 seconds
+Output:
 .venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 .pytest_cache/
 node_modules/
 dist/
+build/
 .env
 .DS_Store
+*.log
 backend/sensitivity_matrix*.npy
 backend/sensitivity_matrix*.json
+frontend/public/mock/backups/
+
