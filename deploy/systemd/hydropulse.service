@@ -1,0 +1,25 @@
+[Unit]
+Description=HydroPulse API
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=hydropulse
+Group=hydropulse
+WorkingDirectory=/opt/hydropulse
+EnvironmentFile=/etc/hydropulse/hydropulse.env
+StateDirectory=hydropulse
+StateDirectoryMode=0750
+UMask=0077
+ExecStart=/opt/hydropulse/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/hydropulse
+
+[Install]
+WantedBy=multi-user.target
